@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import time
+from contextvars import ContextVar
 from typing import AsyncIterator, Optional
 from dataclasses import dataclass
 
@@ -54,6 +55,15 @@ class QwenAnonymousClient:
         self._pool_size = pool_size
         self._tab_pool: list = []  # 固定页签列表
         self._current_idx = 0  # 轮询索引
+        self._page_ctx: ContextVar[object | None] = ContextVar("anonymous_page", default=None)
+        self._start_lock = asyncio.Lock()
+        self._tab_lock = asyncio.Lock()
+        self._busy_pages: set[int] = set()
+
+    @property
+    def _page(self):
+        """当前协程持有的页签。并发请求不能共享一个实例字段。"""
+        return self._page_ctx.get()
 
     # ── 生命周期 ──
 
@@ -72,10 +82,11 @@ class QwenAnonymousClient:
 
     async def _ensure_ready(self) -> bool:
         """确保浏览器就绪（复用已有实例或重新启动）"""
-        if self._is_ready and await self._check_alive():
-            return True
-        await self.close()
-        return await self.start()
+        async with self._start_lock:
+            if self._is_ready and await self._check_alive():
+                return True
+            await self.close()
+            return await self.start()
 
     async def _create_tab(self) -> Optional[object]:
         """创建一个新页签"""
@@ -136,59 +147,90 @@ class QwenAnonymousClient:
 
     async def _acquire_tab(self):
         """轮询获取下一个页签并导航到访客页，页签不可用则重建"""
-        if not self._tab_pool:
-            log.info("[Anonymous] 页签池为空，创建新页签")
-            page = await self._create_tab()
-            if not page:
-                return None
-            self._tab_pool.append(page)
+        async with self._tab_lock:
+            if not self._tab_pool:
+                log.info("[Anonymous] 页签池为空，创建新页签")
+                page = await self._create_tab()
+                if not page:
+                    return None
+                self._tab_pool.append(page)
 
-        # 轮询取下一个页签
-        idx = self._current_idx % len(self._tab_pool)
-        self._current_idx = idx + 1
-        page = self._tab_pool[idx]
+            # 轮询取一个空闲页签；如果池内都忙，则临时扩容，避免两个请求操作同一页。
+            idx = None
+            page = None
+            for offset in range(len(self._tab_pool)):
+                candidate_idx = (self._current_idx + offset) % len(self._tab_pool)
+                candidate = self._tab_pool[candidate_idx]
+                if id(candidate) not in self._busy_pages:
+                    idx = candidate_idx
+                    page = candidate
+                    self._current_idx = candidate_idx + 1
+                    break
 
-        # 检查页签是否仍然可用
-        try:
-            await asyncio.wait_for(page.evaluate("() => true"), timeout=3)
-        except Exception:
-            log.warning(f"[Anonymous] 页签 {idx} 已失效，重建")
-            page = await self._create_tab()
-            if not page:
-                return None
-            self._tab_pool[idx] = page
+            if page is None:
+                log.info("[Anonymous] 页签池均忙，临时创建新页签")
+                page = await self._create_tab()
+                if not page:
+                    return None
+                self._tab_pool.append(page)
+                idx = len(self._tab_pool) - 1
+                self._current_idx = idx + 1
 
-        # 导航到访客页（失败时重建该页签）
-        try:
-            current_url = page.url
-            is_landing = current_url.rstrip('/') in (BASE_URL, f"{BASE_URL}/")
-            if is_landing or '/c/' not in current_url:
-                log.warning(f"[Anonymous] 页面被重定向到 {current_url}，重试导航")
-                await page.goto(GUEST_URL, wait_until="domcontentloaded", timeout=30000)
-                await asyncio.sleep(0.5)
-                current_url = page.url
-            await self._dismiss_popup_on_page(page)
-            log.info(f"[Anonymous] 页签已就绪: {current_url} (idx={idx})")
-            return page
-        except Exception as e:
-            log.warning(f"[Anonymous] 导航失败 ({e})，重建页签 {idx}")
+            self._busy_pages.add(id(page))
+
+            # 检查页签是否仍然可用
             try:
-                if not page.is_closed():
-                    await page.close()
+                await asyncio.wait_for(page.evaluate("() => true"), timeout=3)
             except Exception:
-                pass
-            new_page = await self._create_tab()
-            if new_page:
-                self._tab_pool[idx] = new_page
-                try:
-                    await new_page.goto(GUEST_URL, wait_until="domcontentloaded", timeout=30000)
+                log.warning(f"[Anonymous] 页签 {idx} 已失效，重建")
+                self._busy_pages.discard(id(page))
+                page = await self._create_tab()
+                if not page:
+                    return None
+                self._tab_pool[idx] = page
+                self._busy_pages.add(id(page))
+
+            # 导航到访客页（失败时重建该页签）
+            try:
+                current_url = page.url
+                is_landing = current_url.rstrip('/') in (BASE_URL, f"{BASE_URL}/")
+                if is_landing or '/c/' not in current_url:
+                    log.warning(f"[Anonymous] 页面被重定向到 {current_url}，重试导航")
+                    await page.goto(GUEST_URL, wait_until="domcontentloaded", timeout=30000)
                     await asyncio.sleep(0.5)
-                    await self._dismiss_popup_on_page(new_page)
-                    log.info(f"[Anonymous] 页签 {idx} 重建成功")
-                    return new_page
-                except Exception as e2:
-                    log.error(f"[Anonymous] 重建后导航仍失败: {e2}")
-            return None
+                    current_url = page.url
+                await self._dismiss_popup_on_page(page)
+                log.info(f"[Anonymous] 页签已就绪: {current_url} (idx={idx})")
+                return page
+            except Exception as e:
+                log.warning(f"[Anonymous] 导航失败 ({e})，重建页签 {idx}")
+                self._busy_pages.discard(id(page))
+                try:
+                    if not page.is_closed():
+                        await page.close()
+                except Exception:
+                    pass
+                new_page = await self._create_tab()
+                if new_page:
+                    self._tab_pool[idx] = new_page
+                    self._busy_pages.add(id(new_page))
+                    try:
+                        await new_page.goto(GUEST_URL, wait_until="domcontentloaded", timeout=30000)
+                        await asyncio.sleep(0.5)
+                        await self._dismiss_popup_on_page(new_page)
+                        log.info(f"[Anonymous] 页签 {idx} 重建成功")
+                        return new_page
+                    except Exception as e2:
+                        self._busy_pages.discard(id(new_page))
+                        log.error(f"[Anonymous] 重建后导航仍失败: {e2}")
+                return None
+
+    async def _release_tab(self, page) -> None:
+        """归还页签，允许后续并发请求复用。"""
+        if page is None:
+            return
+        async with self._tab_lock:
+            self._busy_pages.discard(id(page))
 
     async def start(self, retries: int = 3) -> bool:
         """启动浏览器并预热页签池"""
@@ -221,6 +263,7 @@ class QwenAnonymousClient:
             except Exception:
                 pass
         self._tab_pool.clear()
+        self._busy_pages.clear()
         try:
             if self._camoufox:
                 await self._camoufox.__aexit__(None, None, None)
@@ -241,6 +284,150 @@ class QwenAnonymousClient:
             log.debug(f"[Anonymous] 截图: {debug_path}")
         except Exception:
             pass
+
+    async def _click_plus_button(self, wait_after: float = 1.0) -> bool:
+        """点击输入框工具栏的 + 按钮。
+
+        Linux/headless 下 + 图标有时是 SVG，按钮本身没有可匹配文本，所以这里先走
+        明确选择器，再按输入框附近的可点击小图标做坐标兜底。
+        """
+        selectors = [
+            '.mode-select-open',
+            '.mode-select-open-active',
+            '.ant-dropdown-trigger',
+            'button[aria-label*="plus" i]',
+            'button[aria-label*="add" i]',
+            'button[aria-label*="添加" i]',
+            'button[aria-label*="more" i]',
+            'button[aria-label*="更多" i]',
+            'button:has-text("+")',
+            '[class*="plus"]',
+            '[class*="add-btn"]',
+            '[class*="more-action"]',
+            'div[role="button"]:has-text("+")',
+            'textarea + button',
+            '[contenteditable] + button',
+            '[contenteditable] ~ button',
+        ]
+        for sel in selectors:
+            try:
+                btn = await self._page.query_selector(sel)
+                if btn and await btn.is_visible():
+                    await btn.click()
+                    log.info(f"[Anonymous] 已点击 + 按钮: {sel}")
+                    await asyncio.sleep(wait_after)
+                    return True
+            except Exception:
+                pass
+
+        try:
+            result = await self._page.evaluate(r"""() => {
+                const visible = (el) => {
+                    if (!el) return false;
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 &&
+                        style.visibility !== 'hidden' &&
+                        style.display !== 'none' &&
+                        style.pointerEvents !== 'none';
+                };
+                const norm = (value) => String(value || '').toLowerCase();
+                const clickable = (el) => el?.closest?.(
+                    'button,[role="button"],[tabindex],.ant-dropdown-trigger,' +
+                    '[class*="mode-select"],[class*="add"],[class*="plus"],' +
+                    '[class*="upload"],[class*="attach"],[class*="more"]'
+                ) || el;
+
+                const input = document.querySelector('textarea,[contenteditable="true"]');
+                let root = input;
+                for (let i = 0; root && i < 8; i += 1) {
+                    const count = root.querySelectorAll(
+                        'button,[role="button"],[aria-label],.ant-dropdown-trigger,' +
+                        '[class*="mode-select"],[class*="add"],[class*="plus"],' +
+                        '[class*="upload"],[class*="attach"],[class*="more"]'
+                    ).length;
+                    if (count >= 2) break;
+                    root = root.parentElement;
+                }
+
+                const selector = [
+                    'button',
+                    '[role="button"]',
+                    '[aria-label]',
+                    '[title]',
+                    '.ant-dropdown-trigger',
+                    '[class*="mode-select"]',
+                    '[class*="add"]',
+                    '[class*="plus"]',
+                    '[class*="upload"]',
+                    '[class*="attach"]',
+                    '[class*="more"]',
+                    'svg'
+                ].join(',');
+
+                const source = root || document;
+                const inputRect = input?.getBoundingClientRect?.();
+                const seen = new Set();
+                const candidates = [];
+                for (const raw of source.querySelectorAll(selector)) {
+                    const el = clickable(raw);
+                    if (!el || seen.has(el) || !visible(el)) continue;
+                    seen.add(el);
+
+                    const rect = el.getBoundingClientRect();
+                    const text = (el.textContent || '').trim();
+                    const meta = norm([
+                        el.getAttribute('aria-label'),
+                        el.getAttribute('title'),
+                        el.className?.baseVal || el.className,
+                        el.innerHTML
+                    ].join(' '));
+
+                    let score = 0;
+                    if (text === '+') score += 120;
+                    if (/[＋+]/.test(text)) score += 80;
+                    if (/(plus|add|添加|新增|上传|附件|attach|upload|more|更多|mode-select)/i.test(meta)) score += 70;
+                    if (el.querySelector('svg') || el.tagName.toLowerCase() === 'svg') score += 20;
+                    if (rect.width <= 64 && rect.height <= 64) score += 15;
+
+                    if (inputRect) {
+                        const nearY = rect.top <= inputRect.bottom + 100 && rect.bottom >= inputRect.top - 30;
+                        const nearX = rect.left >= inputRect.left - 60 && rect.left <= inputRect.right + 80;
+                        if (nearY && nearX) score += 45;
+                        if (rect.right < inputRect.left - 80) score -= 120;
+                        score += Math.max(0, 30 - Math.abs(rect.left - inputRect.left) / 8);
+                    }
+
+                    if (text.length > 8) score -= 20;
+                    if (score > 35) {
+                        candidates.push({ el, score, left: rect.left, top: rect.top, text, cls: String(el.className || '') });
+                    }
+                }
+
+                candidates.sort((a, b) => (b.score - a.score) || (a.left - b.left) || (a.top - b.top));
+                const best = candidates[0];
+                if (!best) {
+                    return { clicked: false, reason: 'no-candidate', candidateCount: candidates.length };
+                }
+                best.el.click();
+                return {
+                    clicked: true,
+                    score: best.score,
+                    text: best.text,
+                    className: best.cls.slice(0, 120),
+                    left: Math.round(best.left),
+                    top: Math.round(best.top)
+                };
+            }""")
+            if result and result.get("clicked"):
+                log.info(f"[Anonymous] 已通过坐标兜底点击 + 按钮: {result}")
+                await asyncio.sleep(wait_after)
+                return True
+            log.warning(f"[Anonymous] 坐标兜底未找到 + 按钮: {result}")
+        except Exception as e:
+            log.warning(f"[Anonymous] 坐标兜底点击 + 按钮失败: {e}")
+
+        return False
 
     # ── 登录弹窗处理 ──
 
@@ -341,50 +528,10 @@ class QwenAnonymousClient:
         except Exception:
             pass
 
-        # 1. 点击 + 号按钮（优先使用精确选择器）
-        plus_clicked = False
-        for sel in ['.mode-select-open', '.mode-select-open-active', '.ant-dropdown-trigger']:
-            try:
-                btn = await self._page.wait_for_selector(sel, timeout=5000, state='visible')
-                if btn:
-                    await btn.click()
-                    plus_clicked = True
-                    log.info(f"[Anonymous] 已点击 + 按钮: {sel}")
-                    await asyncio.sleep(1)
-                    break
-            except Exception:
-                pass
-
-        # 兜底：通用 + 号选择器
-        if not plus_clicked:
-            plus_selectors = [
-                'button[aria-label*="plus" i]',
-                'button[aria-label*="添加" i]',
-                'button[aria-label*="more" i]',
-                'button[aria-label*="更多" i]',
-                'button:has-text("+")',
-                '[class*="plus"]',
-                '[class*="add-btn"]',
-                '[class*="more-action"]',
-                'div[role="button"]:has-text("+")',
-                'textarea + button',
-                '[contenteditable] + button',
-                '[contenteditable] ~ button',
-            ]
-            for sel in plus_selectors:
-                try:
-                    btn = await self._page.query_selector(sel)
-                    if btn and await btn.is_visible():
-                        await btn.click()
-                        plus_clicked = True
-                        log.info(f"[Anonymous] 已点击 + 号: {sel}")
-                        await asyncio.sleep(1.5)
-                        break
-                except Exception:
-                    pass
-
-        if not plus_clicked:
+        # 1. 点击 + 号按钮
+        if not await self._click_plus_button(wait_after=1.5):
             log.warning("[Anonymous] 未找到 + 号按钮")
+            await self._debug_screenshot("no_plus_button")
             return False
 
         # 2. 选择图片生成选项（优先使用精确选择器）
@@ -550,41 +697,7 @@ class QwenAnonymousClient:
             pass
 
         # 步骤 A：点击 + 按钮打开菜单
-        plus_clicked = False
-        for sel in ['.mode-select-open', '.mode-select-open-active', '.ant-dropdown-trigger']:
-            try:
-                btn = await self._page.wait_for_selector(sel, timeout=5000, state='visible')
-                if btn:
-                    await btn.click()
-                    plus_clicked = True
-                    log.info(f"[Anonymous] 已点击 + 按钮: {sel}")
-                    break
-            except Exception:
-                pass
-
-        if not plus_clicked:
-            # 兜底：尝试其他 + 号选择器
-            plus_selectors = [
-                'button[aria-label*="plus" i]',
-                'button[aria-label*="添加" i]',
-                'button[aria-label*="more" i]',
-                'button:has-text("+")',
-                '[class*="plus"]',
-                '[class*="add-btn"]',
-            ]
-            for sel in plus_selectors:
-                try:
-                    btn = await self._page.query_selector(sel)
-                    if btn and await btn.is_visible():
-                        await btn.click()
-                        plus_clicked = True
-                        log.info(f"[Anonymous] 已点击 + 号: {sel}")
-                        await asyncio.sleep(1)
-                        break
-                except Exception:
-                    pass
-
-        if not plus_clicked:
+        if not await self._click_plus_button(wait_after=1):
             log.warning("[Anonymous] 未找到 + 按钮，尝试直接设置 file input...")
             return await self._upload_via_input(abs_path)
 
@@ -1503,12 +1616,13 @@ class QwenAnonymousClient:
         page = await self._acquire_tab()
         if not page:
             return AnonymousResponse(content="", success=False, error="无法获取页签")
-        self._page = page
+        page_token = self._page_ctx.set(page)
 
         try:
             return await self._do_chat(message, timeout_sec, mode, file_path, aspect_ratio)
         finally:
-            self._page = None
+            self._page_ctx.reset(page_token)
+            await self._release_tab(page)
 
     async def _do_chat(
         self,
@@ -1588,13 +1702,14 @@ class QwenAnonymousClient:
         if not page:
             yield {"error": "无法获取页签"}
             return
-        self._page = page
+        page_token = self._page_ctx.set(page)
 
         try:
             async for chunk in self._do_stream(message, timeout_sec, mode, file_path, aspect_ratio):
                 yield chunk
         finally:
-            self._page = None
+            self._page_ctx.reset(page_token)
+            await self._release_tab(page)
 
     async def _do_stream(
         self,
