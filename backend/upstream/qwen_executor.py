@@ -330,6 +330,51 @@ class QwenExecutor:
                 yield {"type": "event", "event": {"type": "done"}}
                 break
 
+    async def _chat_via_anonymous(self, content: str, model: str, mode: str | None = None, file_path: str | None = None, image_options: dict | None = None):
+        """通过 Camoufox 匿名访客模式非流式聊天（一次性返回完整结果）"""
+        from backend.services.qwen_anonymous_client import get_anonymous_client
+
+        client = await get_anonymous_client()
+
+        user_message = self._extract_user_message(content)
+        if user_message != content.strip():
+            log.info(f"[上游] 匿名模式(非流式)提取用户消息: {repr(user_message[:80])} (原 prompt {len(content)} 字)")
+        content = user_message
+
+        chat_id = f"anonymous-{int(time.time() * 1000)}"
+        yield {
+            "type": "meta",
+            "chat_id": chat_id,
+            "acc": {
+                "email": "anonymous@qwen",
+                "token": "anonymous",
+            },
+        }
+
+        timeout_sec = 120
+        if mode == "image":
+            timeout_sec = 180
+        elif file_path:
+            timeout_sec = 150
+
+        log.info(f"[上游] 匿名模式(非流式)开始 stream 模式={mode} 超时={timeout_sec}s")
+
+        response = await client.chat(content, timeout_sec=timeout_sec, mode=mode, file_path=file_path, image_options=image_options)
+        if not response.success:
+            raise Exception(response.error or "匿名模式非流式请求失败")
+
+        answer = response.content
+        log.info(f"[上游] 匿名模式(非流式)完成 字数={len(answer)}")
+        yield {
+            "type": "event",
+            "event": {
+                "type": "delta",
+                "phase": "answer",
+                "content": answer,
+            },
+        }
+        yield {"type": "event", "event": {"type": "done"}}
+
     async def chat_stream_events_with_retry(
         self,
         model: str,
@@ -345,6 +390,7 @@ class QwenExecutor:
         image_options: dict | None = None,
         thinking_enabled: bool | None = None,
         enable_search: bool = False,
+        stream: bool = True,
     ):
         exclude = set()
         if fixed_account is not None:
@@ -387,8 +433,6 @@ class QwenExecutor:
                     self.account_pool.release(acc)
                 raise
 
-        aspect_ratio = image_options.get("ratio") if image_options else None
-
         for attempt in range(settings.MAX_RETRIES):
             update_request_context(upstream_attempt=attempt + 1)
             acquire_start = time.perf_counter()
@@ -400,7 +444,7 @@ class QwenExecutor:
 
             # 检查是否是匿名模式
             if acc.token == "anonymous":
-                log.info(f"[上游] 使用匿名访客模式 模型={model}")
+                log.info(f"[上游] 使用匿名访客模式 模型={model} stream={stream}")
                 try:
                     # 提取第一个文件路径（匿名模式只支持单文件）
                     file_path = None
@@ -412,9 +456,10 @@ class QwenExecutor:
                         elif isinstance(first_file, str):
                             file_path = first_file
 
-                    log.info(f"[上游] 匿名模式参数 file_path={file_path} image_options={image_options}")
+                    log.info(f"[上游] 匿名模式参数 file_path={file_path} image_options={image_options} stream={stream}")
 
-                    async for evt in self._stream_via_anonymous(content, model, mode=mode, file_path=file_path, image_options=image_options):
+                    anon_method = self._stream_via_anonymous if stream else self._chat_via_anonymous
+                    async for evt in anon_method(content, model, mode=mode, file_path=file_path, image_options=image_options):
                         yield evt
                     return
                 except Exception as e:

@@ -58,16 +58,25 @@ async def prepare_context_attachments(*, app, payload: dict[str, Any], surface: 
     is_anonymous = getattr(acc, "token", "") == "anonymous"
     if is_anonymous:
         account_pool.release(acc)
+        # 将 attachments 的 local_path 转换为 files 格式，供匿名客户端使用
+        anonymous_files = list(payload.get("upstream_files", []) or [])
+        for attachment in manual_attachments:
+            if attachment.local_path:
+                anonymous_files.append({
+                    "path": attachment.local_path,
+                    "filename": attachment.filename,
+                    "content_type": attachment.content_type,
+                })
         return {
             "payload": payload,
             "session_key": session_key,
             "context_mode": "inline",
-            "upstream_files": list(payload.get("upstream_files", []) or []),
+            "upstream_files": anonymous_files,
             "bound_account": None,
             "bound_account_email": None,
             "generated_local_files": [],
             "attachment_fallback": False,
-            "attachments": manual_attachments,  # 保留附件信息，供匿名模式获取 local_path
+            "attachments": manual_attachments,
         }
 
     await affinity.bind_account(session_key, surface, acc.email, context_offloader.settings.CONTEXT_ATTACHMENT_TTL_SECONDS)

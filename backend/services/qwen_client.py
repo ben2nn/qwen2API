@@ -468,6 +468,7 @@ class QwenClient:
         image_options: dict | None = None,
         thinking_enabled: bool | None = None,
         enable_search: bool = False,
+        stream: bool = True,
     ):
         async for item in self.executor.chat_stream_events_with_retry(
             model,
@@ -482,5 +483,6 @@ class QwenClient:
             image_options=image_options,
             thinking_enabled=thinking_enabled,
             enable_search=enable_search,
+            stream=stream,
         ):
             yield item

@@ -45,12 +45,12 @@ fix_*.py
 # local cleanup
 tests/
 docs/superpowers/
-<<<<<<< HEAD
 *.tsbuildinfo
 
 .venv/
 venv/
-=======
+
+data
 
 # Browser automation
 browser_data/
@@ -61,4 +61,3 @@ tokens/
 FINAL_SUMMARY.md
 COMPATIBILITY_FIX.md
 SUMMARY.md
->>>>>>> dev

@@ -219,9 +219,6 @@ function splitInlineThinking(content: string, reasoning = ""): { content: string
   return { content: visible, reasoning: thoughts }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => window.setTimeout(resolve, ms))
-}
 
 function extractReasoningFromContent(content: unknown): string {
   if (!Array.isArray(content)) return ""
@@ -268,7 +265,7 @@ function extractStreamDelta(payload: unknown): { content: string; reasoning: str
 
 // ─── 消息内容渲染组件 ──────────────────────────────────────────────────────
 
-function MessageContent({ content }: { content: MessageContent }) {
+function MessageContent({ content, onPreview }: { content: MessageContent; onPreview?: (url: string) => void }) {
   const text = extractText(content)
   type Seg = { start: number; end: number; url: string }
   const segs: Seg[] = []
@@ -293,8 +290,9 @@ function MessageContent({ content }: { content: MessageContent }) {
         <img
           src={seg.url}
           alt="generated"
-          className="max-w-full rounded-lg shadow-md border"
+          className="max-w-full rounded-lg shadow-md border cursor-pointer hover:opacity-90 transition-opacity"
           loading="lazy"
+          onClick={() => onPreview?.(seg.url)}
           onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none" }}
         />
         <div className="text-xs text-muted-foreground mt-1 break-all font-mono">{seg.url}</div>
@@ -309,7 +307,7 @@ function MessageContent({ content }: { content: MessageContent }) {
 }
 
 /** 用户消息渲染：支持多模态（文本 + 图片） */
-function UserMessageDisplay({ content }: { content: MessageContent }) {
+function UserMessageDisplay({ content, onPreview }: { content: MessageContent; onPreview?: (url: string) => void }) {
   const images = extractImageUrls(content)
   const text = extractText(content)
 
@@ -323,7 +321,7 @@ function UserMessageDisplay({ content }: { content: MessageContent }) {
               src={url}
               alt={`attached-${i}`}
               className="max-w-[200px] max-h-[150px] rounded-lg border object-cover cursor-pointer hover:scale-105 transition-transform"
-              onClick={() => window.open(url, "_blank")}
+              onClick={() => onPreview?.(url)}
             />
           ))}
         </div>
@@ -359,18 +357,18 @@ export default function TestPage() {
   const [model, setModel] = useState("qwen3.6-plus")
   const [availableModels, setAvailableModels] = useState<ModelOption[]>(FALLBACK_MODELS)
   const [stream, setStream] = useState(true)
+  const [typewriter, setTypewriter] = useState(false)
   const [answerMode, setAnswerMode] = useState<"auto" | "thinking" | "fast">("auto")
   const [inputMode, setInputMode] = useState<InputMode>("chat")
   const [imageRatio, setImageRatio] = useState("16:9")
   const [showMenu, setShowMenu] = useState(false)
+  const [previewImage, setPreviewImage] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const dropZoneRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
-  const selectedModel = availableModels.find(option => option.id === model)
-  const selectedBadges = capabilityBadges(selectedModel)
   const selectedForcesThinking = isThinkingVariant(model)
 
   useEffect(() => {
@@ -512,9 +510,17 @@ export default function TestPage() {
   }
 
   const appendAssistantTypewriter = async (message: ChatMessage) => {
+    const content = typeof message.content === "string" ? message.content : extractText(message.content)
+    const reasoning = message.reasoning || ""
+
+    if (!typewriter) {
+      setMessages(prev => [...prev, { role: "assistant", content, reasoning }])
+      return
+    }
+
     setMessages(prev => [...prev, { role: "assistant", content: "" }])
-    let pendingReasoning = message.reasoning || ""
-    let pendingContent = typeof message.content === "string" ? message.content : extractText(message.content)
+    let pendingReasoning = reasoning
+    let pendingContent = content
     while (pendingReasoning || pendingContent) {
       if (pendingReasoning) {
         const chunk = pendingReasoning.slice(0, TYPEWRITER_CHUNK_SIZE)
@@ -525,7 +531,7 @@ export default function TestPage() {
         pendingContent = pendingContent.slice(chunk.length)
         appendAssistantDelta(chunk, "")
       }
-      await sleep(TYPEWRITER_DELAY_MS)
+      await new Promise(resolve => window.setTimeout(resolve, TYPEWRITER_DELAY_MS))
     }
   }
 
@@ -691,7 +697,7 @@ export default function TestPage() {
                 outputQueue.content = outputQueue.content.slice(chunk.length)
                 appendAssistantDelta(chunk, "")
               }
-              await sleep(TYPEWRITER_DELAY_MS)
+              await new Promise(resolve => window.setTimeout(resolve, TYPEWRITER_DELAY_MS))
             }
           } finally {
             typewriterRunning = false
@@ -699,17 +705,21 @@ export default function TestPage() {
           }
         }
 
+        const waitForTypewriter = async () => {
+          while (typewriterRunning || outputQueue.reasoning || outputQueue.content) {
+            await new Promise(resolve => window.setTimeout(resolve, 20))
+          }
+        }
+
         const enqueueAssistantDelta = (content: string, reasoning: string) => {
           if (!content && !reasoning) return
           hasContent = true
-          outputQueue.content += content
-          outputQueue.reasoning += reasoning
-          void runTypewriter()
-        }
-
-        const waitForTypewriter = async () => {
-          while (typewriterRunning || outputQueue.reasoning || outputQueue.content) {
-            await sleep(20)
+          if (typewriter) {
+            outputQueue.content += content
+            outputQueue.reasoning += reasoning
+            void runTypewriter()
+          } else {
+            appendAssistantDelta(content, reasoning)
           }
         }
 
@@ -792,7 +802,7 @@ export default function TestPage() {
           decoder.decode()
         }
 
-        await waitForTypewriter()
+        if (typewriter) await waitForTypewriter()
 
         if (!hasContent) {
           setMessages(prev => {
@@ -869,6 +879,10 @@ export default function TestPage() {
             <input type="checkbox" checked={stream} onChange={() => setStream(!stream)} className="cursor-pointer" />
             <span>流式</span>
           </label>
+          <label className="flex cursor-pointer items-center gap-1.5 rounded-lg border bg-card/80 px-2.5 py-1.5 text-sm">
+            <input type="checkbox" checked={typewriter} onChange={() => setTypewriter(!typewriter)} className="cursor-pointer" />
+            <span>打字机</span>
+          </label>
           <Button variant="outline" size="sm" onClick={() => { setMessages([]); setInput(""); setAttachedImages([]) }}>
             <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> 新建
           </Button>
@@ -897,7 +911,7 @@ export default function TestPage() {
                     ? "bg-red-500/10 border border-red-500/30 text-red-400"
                     : "bg-muted/30 border text-foreground"}`}>
                 {msg.role === "user" ? (
-                  <UserMessageDisplay content={msg.content} />
+                  <UserMessageDisplay content={msg.content} onPreview={setPreviewImage} />
                 ) : msg.role === "assistant" && !msg.content && !msg.reasoning && loading ? (
                   <span className="animate-pulse flex items-center gap-2 text-muted-foreground">
                     <Bot className="h-4 w-4" /> 思考中...
@@ -914,7 +928,7 @@ export default function TestPage() {
                         </div>
                       </details>
                     ) : null}
-                    {msg.content ? <MessageContent content={msg.content} /> : null}
+                    {msg.content ? <MessageContent content={msg.content} onPreview={setPreviewImage} /> : null}
                   </div>
                 ) : (
                   <div className="whitespace-pre-wrap leading-relaxed">{extractText(msg.content)}</div>
@@ -1126,6 +1140,28 @@ export default function TestPage() {
           </div>
         </div>
       </div>
+
+      {/* 图片预览弹窗 */}
+      {previewImage && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+          onClick={() => setPreviewImage(null)}
+        >
+          <div className="relative max-w-[90vw] max-h-[90vh]" onClick={e => e.stopPropagation()}>
+            <button
+              onClick={() => setPreviewImage(null)}
+              className="absolute -top-3 -right-3 z-10 p-1.5 rounded-full bg-background/90 border shadow-lg hover:bg-background transition-colors"
+            >
+              <X className="h-4 w-4" />
+            </button>
+            <img
+              src={previewImage}
+              alt="preview"
+              className="max-w-full max-h-[85vh] rounded-lg shadow-2xl object-contain"
+            />
+          </div>
+        </div>
+      )}
     </div>
   )
 }

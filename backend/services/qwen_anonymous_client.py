@@ -1290,12 +1290,12 @@ class QwenAnonymousClient:
                     stable_count = 0
                 elif content and content == last_content:
                     stable_count += 1
-                    if stable_count >= 7:
+                    if stable_count >= 3:
                         log.info(f"[Anonymous] 流式完成 (轮询稳定)")
                         yield {"done": True, "final_content": last_content, "reason": "poll_stable"}
                         return
 
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.1)
                 continue
 
             # 使用 MutationObserver 获取增量内容
@@ -1336,7 +1336,7 @@ class QwenAnonymousClient:
                             yield {"done": True, "final_content": last_content, "reason": "generation_stopped"}
                             return
                         # 生成中但内容长时间不变，可能是思考阶段
-                        if generating and stable_count >= 30:
+                        if generating and stable_count >= 20:
                             log.info(f"[Anonymous] 流式完成 (内容长时间稳定)")
                             yield {"done": True, "final_content": last_content, "reason": "content_stable_while_generating"}
                             return
@@ -1355,11 +1355,11 @@ class QwenAnonymousClient:
                         stable_count = 0
                     elif content and content == last_content:
                         stable_count += 1
-                        if stable_count >= 7:
+                        if stable_count >= 3:
                             yield {"done": True, "final_content": last_content, "reason": "fallback_stable"}
                             return
 
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.1)
 
         log.warning(f"[Anonymous] 流式超时 ({timeout_sec}s)")
         if last_content:

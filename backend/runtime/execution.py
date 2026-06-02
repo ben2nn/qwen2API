@@ -945,6 +945,7 @@ async def collect_completion_run(
         chat_type=request_chat_type,
         thinking_enabled=getattr(request, "thinking_enabled", None),
         enable_search=bool(getattr(request, "enable_search", False)),
+        stream=getattr(request, "stream", True),
     ):
         if item.get("type") == "meta":
             chat_id = item.get("chat_id")
