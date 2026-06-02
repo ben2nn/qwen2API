@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, type ReactNode } from "react"
 import { Button } from "../components/ui/button"
-import { Send, RefreshCw, Bot, X, Wand2, Plus, Paperclip } from "lucide-react"
+import { Send, RefreshCw, Bot, X, Wand2, Plus, Paperclip, Microscope, Video, Code, Presentation, Search } from "lucide-react"
 import { getAuthHeader } from "../lib/auth"
 import { API_BASE } from "../lib/api"
 import { toast } from "sonner"
@@ -149,12 +149,12 @@ function formatModelOption(option: ModelOption): string {
   return option.display_name || option.id
 }
 
-const FEATURE_MODES: Array<{ mode: InputMode; label: string; icon: string; capKey: keyof ModelCapability }> = [
-  { mode: "deep_research", label: "深入研究", icon: "🔬", capKey: "deep_research" },
-  { mode: "video",         label: "创建视频", icon: "🎬", capKey: "video_gen" },
-  { mode: "web_dev",       label: "网页开发", icon: "💻", capKey: "web_dev" },
-  { mode: "slides",        label: "幻灯片",   icon: "📊", capKey: "slides" },
-  { mode: "search",        label: "网页搜索", icon: "🔍", capKey: "search" },
+const FEATURE_MODES: Array<{ mode: InputMode; label: string; icon: typeof Microscope; capKey: keyof ModelCapability }> = [
+  { mode: "deep_research", label: "深入研究", icon: Microscope, capKey: "deep_research" },
+  { mode: "video",         label: "创建视频", icon: Video,      capKey: "video_gen" },
+  { mode: "web_dev",       label: "网页开发", icon: Code,       capKey: "web_dev" },
+  { mode: "slides",        label: "幻灯片",   icon: Presentation, capKey: "slides" },
+  { mode: "search",        label: "网页搜索", icon: Search,     capKey: "search" },
 ]
 
 function findModelByCapability(models: ModelOption[], capKey: keyof ModelCapability): ModelOption | undefined {
@@ -859,22 +859,6 @@ export default function TestPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {inputMode === "image" && (
-            <div className="flex items-center gap-1.5 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-1.5">
-              <Wand2 className="h-3 w-3 text-primary" />
-              <span className="text-xs font-medium text-primary">比例</span>
-              <select
-                value={imageRatio}
-                onChange={e => setImageRatio(e.target.value)}
-                className="bg-transparent border-0 text-xs text-primary font-medium outline-none cursor-pointer"
-                disabled={loading}
-              >
-                {ASPECT_RATIOS.map(r => (
-                  <option key={r.value} value={r.value}>{r.label}</option>
-                ))}
-              </select>
-            </div>
-          )}
           <label className="flex cursor-pointer items-center gap-1.5 rounded-lg border bg-card/80 px-2.5 py-1.5 text-sm">
             <input type="checkbox" checked={stream} onChange={() => setStream(!stream)} className="cursor-pointer" />
             <span>流式</span>
@@ -1050,7 +1034,6 @@ export default function TestPage() {
                       <Wand2 className={`h-4 w-4 ${inputMode === "image" ? "text-primary" : "text-muted-foreground"}`} />
                       <span>图片生成</span>
                     </button>
-                    <div className="border-t border-border/50" />
                     {/* 功能模式 */}
                     {FEATURE_MODES.map(f => (
                       <button
@@ -1075,7 +1058,7 @@ export default function TestPage() {
                           }
                         }}
                       >
-                        <span className="text-sm">{f.icon}</span>
+                        <f.icon className="h-4 w-4 text-muted-foreground" />
                         <span>{f.label}</span>
                       </button>
                     ))}
@@ -1092,14 +1075,28 @@ export default function TestPage() {
                 >
                   {inputMode === "image" ? (
                     <Wand2 className="h-3 w-3" />
-                  ) : (
-                    <span className="text-xs">{FEATURE_MODES.find(f => f.mode === inputMode)?.icon}</span>
-                  )}
+                  ) : (() => {
+                    const Icon = FEATURE_MODES.find(f => f.mode === inputMode)?.icon
+                    return Icon ? <Icon className="h-3 w-3" /> : null
+                  })()}
                   <span className="text-xs font-medium">
                     {inputMode === "image" ? "图片生成" : FEATURE_MODES.find(f => f.mode === inputMode)?.label}
                   </span>
                   <X className="h-2.5 w-2.5 opacity-60" />
                 </button>
+              )}
+              {/* 比例选择（仅图片模式显示） */}
+              {inputMode === "image" && (
+                <select
+                  value={imageRatio}
+                  onChange={e => setImageRatio(e.target.value)}
+                  className="ml-1 bg-primary/10 border-0 rounded-md text-xs font-medium text-primary px-2 py-1 outline-none cursor-pointer hover:bg-primary/15 transition-colors"
+                  disabled={loading}
+                >
+                  {ASPECT_RATIOS.map(r => (
+                    <option key={r.value} value={r.value}>{r.label}</option>
+                  ))}
+                </select>
               )}
             </div>
 
