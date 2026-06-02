@@ -105,16 +105,6 @@ function extractImageUrls(content: MessageContent): string[] {
 // ─── 模型相关工具函数 ──────────────────────────────────────────────────────
 
 const MODEL_MODE_SUFFIX_RE = /-(thinking|deep-research|deep_research|image|video|webdev|web-dev|slides|t2i|t2v)$/i
-const CAPABILITY_LABELS: Array<{ key: keyof ModelCapability; label: string }> = [
-  { key: "thinking", label: "思考" },
-  { key: "search", label: "搜索" },
-  { key: "vision", label: "视觉" },
-  { key: "deep_research", label: "研究" },
-  { key: "image_gen", label: "图片" },
-  { key: "video_gen", label: "视频" },
-  { key: "web_dev", label: "建站" },
-  { key: "slides", label: "PPT" },
-]
 
 function asText(value: unknown): string {
   return typeof value === "string" ? value : ""
@@ -145,11 +135,6 @@ function isBaseModelOption(option: ModelOption): boolean {
 
 function isThinkingVariant(modelId: string): boolean {
   return /-thinking$/i.test(modelId)
-}
-
-function capabilityBadges(option?: ModelOption): string[] {
-  if (!option?.capabilities) return []
-  return CAPABILITY_LABELS.filter(item => option.capabilities?.[item.key]).map(item => item.label)
 }
 
 function formatModelOption(option: ModelOption): string {
