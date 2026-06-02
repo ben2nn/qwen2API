@@ -36,7 +36,7 @@ from backend.services.token_calc import count_tokens
 from backend.services.workspace_context import derive_workspace_root
 from backend.toolcall.normalize import build_tool_name_registry
 
-log = logging.getLogger("qwen2api.anthropic")
+log = logging.getLogger("web2api.anthropic")
 router = APIRouter()
 
 

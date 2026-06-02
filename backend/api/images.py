@@ -12,7 +12,7 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from backend.services.qwen_client import QwenClient
 
-log = logging.getLogger("qwen2api.images")
+log = logging.getLogger("web2api.images")
 router = APIRouter()
 
 DEFAULT_IMAGE_MODEL = "qwen3.6-plus"

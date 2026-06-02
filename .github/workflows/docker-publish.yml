@@ -31,7 +31,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: harbor.hrids.com/ai_project/Web2API
+          images: harbor.hrids.com/ai_project/web2api
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}

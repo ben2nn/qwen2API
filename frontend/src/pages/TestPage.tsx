@@ -1,9 +1,16 @@
 import { useEffect, useRef, useState, useCallback, type ReactNode } from "react"
 import { Button } from "../components/ui/button"
-import { Send, RefreshCw, Bot, X, Wand2, Plus, Paperclip, Microscope, Video, Code, Presentation, Search } from "lucide-react"
+import { Send, RefreshCw, Bot, X, Wand2, Plus, Paperclip, Microscope, Video, Code, Presentation, Search, Copy, Check } from "lucide-react"
 import { getAuthHeader } from "../lib/auth"
 import { API_BASE } from "../lib/api"
 import { toast } from "sonner"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter"
+import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism"
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const codeTheme = oneDark as any
 
 // ─── 类型定义 ───────────────────────────────────────────────────────────────
 
@@ -265,45 +272,81 @@ function extractStreamDelta(payload: unknown): { content: string; reasoning: str
 
 // ─── 消息内容渲染组件 ──────────────────────────────────────────────────────
 
-function MessageContent({ content, onPreview }: { content: MessageContent; onPreview?: (url: string) => void }) {
-  const text = extractText(content)
-  type Seg = { start: number; end: number; url: string }
-  const segs: Seg[] = []
-  const fullRe = /!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^\s"<>]+\.(?:jpg|jpeg|png|webp|gif)[^\s"<>]*)/gi
-  let m: RegExpExecArray | null
-  while ((m = fullRe.exec(text)) !== null) {
-    segs.push({ start: m.index, end: m.index + m[0].length, url: (m[1] || m[2]) as string })
-  }
+/** 代码块：带语言标签和复制按钮 */
+function CodeBlock({ className, children, ...props }: React.HTMLAttributes<HTMLElement> & { children?: ReactNode }) {
+  const [copied, setCopied] = useState(false)
+  const match = /language-(\w+)/.exec(className || "")
+  const lang = match?.[1] || ""
+  const code = String(children).replace(/\n$/, "")
 
-  if (segs.length === 0) {
-    return <div className="whitespace-pre-wrap leading-relaxed">{text}</div>
-  }
-
-  const nodes: ReactNode[] = []
-  let cursor = 0
-  segs.forEach((seg, i) => {
-    if (seg.start > cursor) {
-      nodes.push(<span key={"t" + i}>{text.slice(cursor, seg.start)}</span>)
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(code)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // fallback
+      const ta = document.createElement("textarea")
+      ta.value = code
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand("copy")
+      document.body.removeChild(ta)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
     }
-    nodes.push(
-      <div key={"i" + i} className="my-2">
-        <img
-          src={seg.url}
-          alt="generated"
-          className="max-w-full rounded-lg shadow-md border cursor-pointer hover:opacity-90 transition-opacity"
-          loading="lazy"
-          onClick={() => onPreview?.(seg.url)}
-          onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none" }}
-        />
-        <div className="text-xs text-muted-foreground mt-1 break-all font-mono">{seg.url}</div>
+  }
+
+  if (match) {
+    return (
+      <div className="code-block-wrapper">
+        {lang && <div className="code-lang-label">{lang}</div>}
+        <button className="code-copy-btn" onClick={handleCopy} title="复制代码">
+          {copied ? <Check className="inline w-3.5 h-3.5" /> : <Copy className="inline w-3.5 h-3.5" />}
+        </button>
+        <SyntaxHighlighter
+          style={codeTheme}
+          language={lang}
+          PreTag="div"
+          customStyle={{ margin: 0, borderRadius: "0.5rem", fontSize: "0.88em", paddingTop: lang ? "1.8em" : "1em" }}
+          {...props}
+        >
+          {code}
+        </SyntaxHighlighter>
       </div>
     )
-    cursor = seg.end
-  })
-  if (cursor < text.length) {
-    nodes.push(<span key="tail">{text.slice(cursor)}</span>)
   }
-  return <div className="whitespace-pre-wrap leading-relaxed">{nodes}</div>
+  // 行内代码走默认渲染
+  return <code className={className} {...props}>{children}</code>
+}
+
+function MessageContent({ content, onPreview }: { content: MessageContent; onPreview?: (url: string) => void }) {
+  const text = extractText(content)
+
+  return (
+    <div className="markdown-body">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          code: (props) => <CodeBlock {...props} />,
+          img: ({ src, alt }) => (
+            <div className="my-2">
+              <img
+                src={src}
+                alt={alt || "image"}
+                className="max-w-full rounded-lg shadow-md border cursor-pointer hover:opacity-90 transition-opacity"
+                loading="lazy"
+                onClick={() => src && onPreview?.(src)}
+                onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none" }}
+              />
+            </div>
+          ),
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  )
 }
 
 /** 用户消息渲染：支持多模态（文本 + 图片） */
