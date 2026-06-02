@@ -4,7 +4,7 @@ import uuid
 import logging
 from backend.services.token_calc import count_tokens
 
-log = logging.getLogger("Web2API.embeddings")
+log = logging.getLogger("web2api.embeddings")
 router = APIRouter()
 
 @router.post("/embeddings")

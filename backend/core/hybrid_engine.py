@@ -7,7 +7,7 @@ Phase 1 policy:
 
 import logging
 
-log = logging.getLogger("Web2API.hybrid_engine")
+log = logging.getLogger("web2api.hybrid_engine")
 
 
 class HybridEngine:

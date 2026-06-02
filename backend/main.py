@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 import os
 import sys
 
@@ -23,17 +24,34 @@ from backend.services.file_store import LocalFileStore
 from backend.services.context_offload import ContextOffloader
 from backend.services.upstream_file_uploader import UpstreamFileUploader
 import backend.api.models as models
-from backend.api import admin, v1_chat, probes, anthropic, gemini, embeddings, images, files_api
+from backend.api import admin, v1_chat, probes, anthropic, gemini, embeddings, images, files_api, responses
 from backend.services.garbage_collector import garbage_collect_chats
 from backend.services.context_cleanup import context_cleanup_loop
 
 configure_logging(getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO))
-log = logging.getLogger("Web2API")
+log = logging.getLogger("web2api")
+
+
+class SPAStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     with request_context(surface="startup"):
         log.info("正在启动 Web2API v2.0 企业网关...")
+        log.info(
+            "运行配置: ENGINE_MODE=%s chat_id_prewarm_target=%s chat_id_prewarm_ttl=%ss max_inflight_per_account=%s",
+            os.getenv("ENGINE_MODE", "unused"),
+            settings.CHAT_ID_PREWARM_TARGET_PER_ACCOUNT,
+            settings.CHAT_ID_PREWARM_TTL_SECONDS,
+            settings.MAX_INFLIGHT_PER_ACCOUNT,
+        )
 
         # 初始化数据存储 (带锁 JSON)
         app.state.accounts_db = AsyncJsonDB(settings.ACCOUNTS_FILE, default_data=[])
@@ -64,7 +82,12 @@ async def lifespan(app: FastAPI):
 
         # 启动 chat_id 预热池（省上游 /chats/new 握手 500ms~6s）
         from backend.services.chat_id_pool import ChatIdPool
-        app.state.chat_id_pool = ChatIdPool(app.state.qwen_client, target_per_account=5, ttl_seconds=600, default_model="qwen3.6-plus")
+        app.state.chat_id_pool = ChatIdPool(
+            app.state.qwen_client,
+            target_per_account=settings.CHAT_ID_PREWARM_TARGET_PER_ACCOUNT,
+            ttl_seconds=settings.CHAT_ID_PREWARM_TTL_SECONDS,
+            default_model="qwen3.6-plus",
+        )
         app.state.qwen_executor.chat_id_pool = app.state.chat_id_pool  # 让 executor 直接访问
         await app.state.chat_id_pool.start()
 
@@ -112,6 +135,7 @@ app.add_middleware(
 
 # 挂载路由
 app.include_router(v1_chat.router, tags=["OpenAI Compatible"])
+app.include_router(responses.router, tags=["OpenAI Responses"])
 app.include_router(models.router, tags=["Models"])
 app.include_router(anthropic.router, tags=["Claude Compatible"])
 app.include_router(gemini.router, tags=["Gemini Compatible"])

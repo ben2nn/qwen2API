@@ -9,7 +9,7 @@ from backend.services.auth_resolver import AuthResolver
 from backend.upstream.payload_builder import build_chat_payload
 from backend.upstream.sse_consumer import parse_sse_chunk
 
-log = logging.getLogger("Web2API.executor")
+log = logging.getLogger("web2api.executor")
 
 
 class QwenExecutor:
@@ -24,6 +24,18 @@ class QwenExecutor:
     def active_chat_ids(self) -> set[str]:
         """Return upstream chat IDs currently used by in-flight streams."""
         return set(self._active_chat_ids)
+
+    async def _delete_chat_on_close(self, token: str, chat_id: str, *, source: str) -> None:
+        delete_fn = getattr(self.engine, "delete_chat_reliable", None)
+        if delete_fn is not None:
+            await delete_fn(token, chat_id, source=source)
+            return
+        raw_delete = getattr(self.engine, "delete_chat", None)
+        if raw_delete is not None:
+            try:
+                await raw_delete(token, chat_id)
+            except Exception as exc:
+                log.warning("[DeleteChat] failed chat_id=%s source=%s error=%s", chat_id, source, exc)
 
     async def create_chat(self, token: str, model: str, chat_type: str = "t2t", *, use_prewarmed: bool = True) -> str:
         # 预热池快路径：如果能从池里拿到一个已预建的 chat_id 直接用
@@ -105,22 +117,38 @@ class QwenExecutor:
         content: str,
         has_custom_tools: bool = False,
         files: list[dict] | None = None,
+        chat_type: str = "t2t",
+        image_options: dict | None = None,
+        thinking_enabled: bool | None = None,
+        enable_search: bool = False,
     ):
         stream_fn = getattr(self.engine, "stream_chat_once", None) or getattr(self.engine, "fetch_chat", None)
         if stream_fn is None:
             raise Exception("stream transport unavailable")
 
-        payload = build_chat_payload(chat_id, model, content, has_custom_tools, files=files)
+        payload = build_chat_payload(
+            chat_id,
+            model,
+            content,
+            has_custom_tools,
+            files=files,
+            chat_type=chat_type,
+            image_options=image_options,
+            thinking_enabled=thinking_enabled,
+            enable_search=enable_search,
+        )
         buffer = ""
         started_at = time.perf_counter()
         first_event_logged = False
         last_chunk_time = time.perf_counter()
         total_output_chars = 0  # 方案4：统计输出字符数
+        parsed_event_count = 0
+        raw_tail = ""
 
         feature_config = payload.get("messages", [{}])[0].get("feature_config", {})
         prompt_len = len(content)
         log.info(f"[上游] 开始流式 会话={chat_id} 模型={model} 自定义工具={has_custom_tools} prompt长度={prompt_len} ({prompt_len/1024:.1f}KB)")
-        log.info(f"[上游] 功能配置: function_calling={feature_config.get('function_calling')} auto_search={feature_config.get('auto_search')} code_interpreter={feature_config.get('code_interpreter')} plugins_enabled={feature_config.get('plugins_enabled')}")
+        log.info(f"[上游] 功能配置: thinking_enabled={feature_config.get('thinking_enabled')} auto_thinking={feature_config.get('auto_thinking')} thinking_mode={feature_config.get('thinking_mode')} function_calling={feature_config.get('function_calling')} auto_search={feature_config.get('auto_search')} code_interpreter={feature_config.get('code_interpreter')} plugins_enabled={feature_config.get('plugins_enabled')} image_size={feature_config.get('image_size')} image_ratio={feature_config.get('image_ratio')}")
 
         prompt_content = payload.get("messages", [{}])[0].get("content", "")
         if has_custom_tools:
@@ -147,9 +175,11 @@ class QwenExecutor:
                 if "chunk" in chunk_result:
                     buffer += chunk_result["chunk"]
                     total_output_chars += len(chunk_result["chunk"])
+                    raw_tail = (raw_tail + chunk_result["chunk"])[-500:]
                     while "\n\n" in buffer:
                         msg, buffer = buffer.split("\n\n", 1)
                         for evt in parse_sse_chunk(msg):
+                            parsed_event_count += 1
                             if not first_event_logged:
                                 first_event_logged = True
                                 log.info(
@@ -168,6 +198,7 @@ class QwenExecutor:
 
         if buffer:
             for evt in parse_sse_chunk(buffer):
+                parsed_event_count += 1
                 if not first_event_logged:
                     first_event_logged = True
                     log.info(
@@ -182,6 +213,13 @@ class QwenExecutor:
             raise Exception(f"Upstream timeout suspected: only {total_output_chars} chars in {elapsed:.1f}s")
 
         log.info(f"[上游] 流结束 会话={chat_id} 总耗时={elapsed:.3f}s 流字节={total_output_chars}")
+        if parsed_event_count == 0:
+            log.warning(
+                "[上游] SSE 未解析到有效 delta 会话=%s 流字节=%s raw_tail=%r",
+                chat_id,
+                total_output_chars,
+                raw_tail,
+            )
 
     @staticmethod
     def _extract_user_message(prompt: str) -> str:
@@ -234,13 +272,13 @@ class QwenExecutor:
                       and not l.startswith('##TOOL_CALL##') and l.strip()]
         return '\n'.join(user_lines[-5:]).strip() if user_lines else prompt.strip()
 
-    async def _stream_via_anonymous(self, content: str, model: str, mode: str | None = None, file_path: str | None = None, aspect_ratio: str | None = None):
+    async def _stream_via_anonymous(self, content: str, model: str, mode: str | None = None, file_path: str | None = None, image_options: dict | None = None):
         """通过 Camoufox 匿名访客模式流式聊天
 
         Args:
             mode: "image" 切换到图片生成模式，None 为普通聊天
             file_path: 要上传的文件路径，None 表示不上传
-            aspect_ratio: 图片比例，如 "16:9", "1:1", "9:16" 等
+            image_options: 图片选项，包含比例等信息
         """
         from backend.services.qwen_anonymous_client import get_anonymous_client
 
@@ -271,7 +309,7 @@ class QwenExecutor:
 
         log.info(f"[上游] 匿名模式开始 stream 模式={mode} 超时={timeout_sec}s")
 
-        async for chunk in client.chat_stream(content, timeout_sec=timeout_sec, mode=mode, file_path=file_path, aspect_ratio=aspect_ratio):
+        async for chunk in client.chat_stream(content, timeout_sec=timeout_sec, mode=mode, file_path=file_path, image_options=image_options):
             if "error" in chunk:
                 raise Exception(chunk["error"])
             elif "content" in chunk:
@@ -301,37 +339,61 @@ class QwenExecutor:
         fixed_account=None,
         existing_chat_id: str | None = None,
         mode: str | None = None,
-        aspect_ratio: str | None = None,
-        attachments: list | None = None,
+        delete_on_close: bool = False,
+        use_prewarmed: bool = True,
+        chat_type: str = "t2t",
+        image_options: dict | None = None,
+        thinking_enabled: bool | None = None,
+        enable_search: bool = False,
     ):
         exclude = set()
         if fixed_account is not None:
             update_request_context(upstream_attempt=1)
             acc = fixed_account
+            meta_yielded = False
             try:
                 log.info(f"[上游] 使用指定账号 账号={acc.email} 模型={model}")
-                chat_id = existing_chat_id or await self.create_chat(acc.token, model)
+                chat_id = existing_chat_id or await self.create_chat(acc.token, model, chat_type=chat_type, use_prewarmed=use_prewarmed)
                 self._active_chat_ids.add(chat_id)
                 update_request_context(chat_id=chat_id)
                 if existing_chat_id:
                     log.info(f"[上游] 复用会话 会话={chat_id} 账号={acc.email}")
                 else:
                     log.info(f"[上游] 创建会话 会话={chat_id} 账号={acc.email}")
+                should_delete_chat = delete_on_close and not existing_chat_id
                 try:
+                    meta_yielded = True
                     yield {"type": "meta", "chat_id": chat_id, "acc": acc}
-                    async for evt in self.stream(acc.token, chat_id, model, content, has_custom_tools, files=files):
+                    async for evt in self.stream(
+                        acc.token,
+                        chat_id,
+                        model,
+                        content,
+                        has_custom_tools,
+                        files=files,
+                        chat_type=chat_type,
+                        image_options=image_options,
+                        thinking_enabled=thinking_enabled,
+                        enable_search=enable_search,
+                    ):
                         yield {"type": "event", "event": evt}
                 finally:
                     self._active_chat_ids.discard(chat_id)
+                    if should_delete_chat:
+                        await self._delete_chat_on_close(acc.token, chat_id, source="stream_close")
                 return
-            except Exception:
-                self.account_pool.release(acc)
+            except BaseException as e:
+                if isinstance(e, asyncio.CancelledError) or isinstance(e, Exception) or not meta_yielded:
+                    self.account_pool.release(acc)
                 raise
+
+        aspect_ratio = image_options.get("ratio") if image_options else None
 
         for attempt in range(settings.MAX_RETRIES):
             update_request_context(upstream_attempt=attempt + 1)
             acquire_start = time.perf_counter()
             acc = await self.account_pool.acquire_wait(timeout=60, exclude=exclude)
+            meta_yielded = False
             acquire_elapsed = time.perf_counter() - acquire_start
             if not acc:
                 raise Exception("No available accounts in pool (all busy or rate limited)")
@@ -346,24 +408,13 @@ class QwenExecutor:
                         first_file = files[0]
                         if isinstance(first_file, dict):
                             file_path = first_file.get("path") or first_file.get("file_path")
-                            # 兼容：如果 files 中有 aspect_ratio 且外部未传入，使用 files 中的
-                            if aspect_ratio is None:
-                                aspect_ratio = first_file.get("aspect_ratio")
+
                         elif isinstance(first_file, str):
                             file_path = first_file
 
-                    # 兜底：从 attachments 中获取 local_path（匿名模式无法通过 API 上传，upstream_files 为空）
-                    if not file_path and attachments:
-                        for att in attachments:
-                            att_path = getattr(att, "local_path", None)
-                            if att_path:
-                                file_path = att_path
-                                log.info(f"[上游] 从 attachments 获取文件路径: {att_path}")
-                                break
+                    log.info(f"[上游] 匿名模式参数 file_path={file_path} image_options={image_options}")
 
-                    log.info(f"[上游] 匿名模式参数 file_path={file_path} aspect_ratio={aspect_ratio}")
-
-                    async for evt in self._stream_via_anonymous(content, model, mode=mode, file_path=file_path, aspect_ratio=aspect_ratio):
+                    async for evt in self._stream_via_anonymous(content, model, mode=mode, file_path=file_path, image_options=image_options):
                         yield evt
                     return
                 except Exception as e:
@@ -375,21 +426,40 @@ class QwenExecutor:
             try:
                 log.info(f"[上游] 账号已获取 账号={acc.email} 模型={model} 第{attempt + 1}次 获取耗时={acquire_elapsed:.3f}s")
                 create_start = time.perf_counter()
-                chat_id = await self.create_chat(acc.token, model)
+                chat_id = await self.create_chat(acc.token, model, chat_type=chat_type, use_prewarmed=use_prewarmed)
                 self._active_chat_ids.add(chat_id)
                 create_elapsed = time.perf_counter() - create_start
                 update_request_context(chat_id=chat_id)
                 log.info(f"[上游] 创建会话 会话={chat_id} 账号={acc.email} 耗时={create_elapsed:.3f}s")
+                should_delete_chat = delete_on_close
                 try:
+                    meta_yielded = True
                     yield {"type": "meta", "chat_id": chat_id, "acc": acc}
 
-                    async for evt in self.stream(acc.token, chat_id, model, content, has_custom_tools, files=files):
+                    async for evt in self.stream(
+                        acc.token,
+                        chat_id,
+                        model,
+                        content,
+                        has_custom_tools,
+                        files=files,
+                        chat_type=chat_type,
+                        image_options=image_options,
+                        thinking_enabled=thinking_enabled,
+                        enable_search=enable_search,
+                    ):
                         yield {"type": "event", "event": evt}
                 finally:
                     self._active_chat_ids.discard(chat_id)
+                    if should_delete_chat:
+                        await self._delete_chat_on_close(acc.token, chat_id, source="stream_close")
                 return
 
-            except Exception as e:
+            except BaseException as e:
+                if not isinstance(e, Exception):
+                    if isinstance(e, asyncio.CancelledError) or not meta_yielded:
+                        self.account_pool.release(acc)
+                    raise
                 err_msg = str(e).lower()
                 is_timeout = (
                     "timeout" in err_msg

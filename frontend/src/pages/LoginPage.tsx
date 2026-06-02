@@ -32,7 +32,7 @@ export default function LoginPage() {
       }
 
       const data = await res.json()
-      localStorage.setItem("Web2API_key", data.token)
+      localStorage.setItem("web2api_key", data.token)
       toast.success("登录成功")
       navigate("/")
     } catch {

@@ -18,7 +18,7 @@ interface AdminSettings {
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AdminSettings | null>(null)
-  const [sessionKey, setSessionKey] = useState(() => localStorage.getItem("Web2API_key") || "")
+  const [sessionKey, setSessionKey] = useState(() => localStorage.getItem("web2api_key") || "")
   const [maxInflight, setMaxInflight] = useState(4)
   const [globalMaxInflight, setGlobalMaxInflight] = useState(0)
   const [poolTarget, setPoolTarget] = useState(5)
@@ -51,13 +51,13 @@ export default function SettingsPage() {
       toast.error("请输入 Key")
       return
     }
-    localStorage.setItem('Web2API_key', sessionKey.trim())
+    localStorage.setItem('web2api_key', sessionKey.trim())
     toast.success("Key 已保存到本地，刷新数据...")
     fetchSettings()
   }
 
   const handleClearSessionKey = () => {
-    localStorage.removeItem('Web2API_key')
+    localStorage.removeItem('web2api_key')
     setSessionKey("")
     toast.success("Key 已清除")
   }

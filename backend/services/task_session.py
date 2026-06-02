@@ -9,7 +9,7 @@ from typing import Any
 from backend.adapter.standard_request import CLAUDE_CODE_OPENAI_PROFILE, StandardRequest
 from backend.services.prompt_builder import _extract_text, _extract_user_text_only, _render_history_tool_call
 
-log = logging.getLogger("Web2API.task_session")
+log = logging.getLogger("web2api.task_session")
 
 
 @dataclass(slots=True)

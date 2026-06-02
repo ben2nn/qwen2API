@@ -12,7 +12,7 @@ from .qwen_ai_client import QwenAIClient
 from .qianwen_client import QianwenClient
 from .doubao_client import DoubaoClient
 
-log = logging.getLogger("Web2API.browser_chat.factory")
+log = logging.getLogger("web2api.browser_chat.factory")
 
 # 站点名称到客户端类的映射
 _CLIENT_REGISTRY: Dict[str, Type[BaseBrowserChatClient]] = {

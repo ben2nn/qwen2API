@@ -21,7 +21,7 @@ __all__ = [
     "ToolSieve",
 ]
 
-log = logging.getLogger("Web2API.tool_parser")
+log = logging.getLogger("web2api.tool_parser")
 
 QNML_TOOL_MARKERS = ("<|QNML|tool_calls", "</|QNML|tool_calls", "<|QNML|invoke")
 LEGACY_XML_TOOL_MARKERS = ("<tool_calls", "</tool_calls", "<invoke", "<tool_call>", "</tool_call>")

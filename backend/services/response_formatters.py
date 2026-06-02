@@ -26,6 +26,8 @@ def build_openai_completion_payload(*, completion_id: str, created: int, model_n
     else:
         oai_tool_calls = []
         msg = {"role": "assistant", "content": execution.state.answer_text}
+        if execution.state.reasoning_text:
+            msg["reasoning_content"] = execution.state.reasoning_text
         finish_reason = "stop"
 
     log_payload = [
@@ -37,7 +39,7 @@ def build_openai_completion_payload(*, completion_id: str, created: int, model_n
         for call in oai_tool_calls
     ]
     import logging
-    logging.getLogger("Web2API.chat").info(
+    logging.getLogger("web2api.chat").info(
         "[OAI] response finish_reason=%s tool_calls=%s text_preview=%r",
         finish_reason,
         log_payload,

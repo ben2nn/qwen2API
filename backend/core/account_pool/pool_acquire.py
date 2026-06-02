@@ -11,7 +11,7 @@ from backend.core.config import settings
 
 from backend.core.account_pool.pool_core import Account
 
-log = logging.getLogger("Web2API.accounts.acquire")
+log = logging.getLogger("web2api.accounts.acquire")
 
 
 def _jitter_seconds() -> float:

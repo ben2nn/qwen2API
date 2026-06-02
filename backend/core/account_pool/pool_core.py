@@ -9,7 +9,7 @@ from typing import Optional
 from backend.core.database import AsyncJsonDB
 from backend.core.config import settings
 
-log = logging.getLogger("Web2API.accounts.core")
+log = logging.getLogger("web2api.accounts.core")
 
 
 class Account:

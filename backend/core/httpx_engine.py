@@ -9,7 +9,7 @@ import json
 import logging
 from curl_cffi.requests import AsyncSession
 
-log = logging.getLogger("Web2API.httpx_engine")
+log = logging.getLogger("web2api.httpx_engine")
 
 BASE_URL = "https://chat.qwen.ai"
 

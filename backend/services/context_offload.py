@@ -8,9 +8,9 @@ from typing import Any
 
 from backend.adapter.standard_request import CLAUDE_CODE_OPENAI_PROFILE
 
-SYSTEM_CONTEXT_FILE_PREFIX = "Web2API_context"
+SYSTEM_CONTEXT_FILE_PREFIX = "web2api_context"
 SYSTEM_CONTEXT_PROMPT_NOTE = (
-    "System context files named Web2API_context*.txt/.md/.json/.log may be attached. "
+    "System context files named web2api_context*.txt/.md/.json/.log may be attached. "
     "Use them as supporting context. User-uploaded files are separate user inputs and should also be respected."
 )
 

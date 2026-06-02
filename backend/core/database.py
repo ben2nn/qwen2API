@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-log = logging.getLogger("Web2API.db")
+log = logging.getLogger("web2api.db")
 
 class AsyncJsonDB:
     """带异步读写锁的 JSON 文件存储，防止并发损坏。"""

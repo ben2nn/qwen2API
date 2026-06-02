@@ -13,7 +13,7 @@ from typing import Optional, List, Any
 
 from .base_client import BaseBrowserChatClient, ChatResponse, ClientConfig
 
-log = logging.getLogger("Web2API.browser_chat.doubao")
+log = logging.getLogger("web2api.browser_chat.doubao")
 
 # 默认配置
 _DEFAULT_CONFIG = ClientConfig(

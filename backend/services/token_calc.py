@@ -1,7 +1,7 @@
 import tiktoken
 import logging
 
-log = logging.getLogger("Web2API.token")
+log = logging.getLogger("web2api.token")
 
 try:
     # 默认使用 cl100k_base，因为目前这是最通用的 GPT-4 级分词器

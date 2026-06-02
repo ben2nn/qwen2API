@@ -13,7 +13,7 @@ import time
 from typing import AsyncIterator, Optional
 from dataclasses import dataclass
 
-log = logging.getLogger("Web2API.anonymous")
+log = logging.getLogger("web2api.anonymous")
 
 BASE_URL = "https://chat.qwen.ai"
 GUEST_URL = f"{BASE_URL}/c/guest"
@@ -329,11 +329,11 @@ class QwenAnonymousClient:
 
     # ── 模式切换 ──
 
-    async def _select_image_mode(self, aspect_ratio: str | None = None) -> bool:
+    async def _select_image_mode(self, image_options: dict | None = None) -> bool:
         """切换到图片生成模式（点击 + 号 → 选择图片生成）
 
         Args:
-            aspect_ratio: 图片比例，如 "16:9", "1:1", "9:16" 等
+            image_options: 图片选项，包含比例等信息
         """
         # 等待页面就绪
         try:
@@ -456,6 +456,7 @@ class QwenAnonymousClient:
             return False
 
         # 3. 设置图片比例（如果提供了参数）
+        aspect_ratio = image_options.get("ratio") if image_options else None
         log.info(f"[Anonymous] 检查图片比例参数: aspect_ratio={aspect_ratio}")
         if aspect_ratio:
             await self._set_aspect_ratio(aspect_ratio)
@@ -1453,15 +1454,15 @@ class QwenAnonymousClient:
 
     # ── 公开接口 ──
 
-    async def _ensure_mode(self, mode: str | None, aspect_ratio: str | None = None) -> bool:
+    async def _ensure_mode(self, mode: str | None, image_options: dict | None = None) -> bool:
         """确保处于正确的模式
 
         Args:
             mode: "image" 切换到图片生成模式，None 为普通聊天
-            aspect_ratio: 图片比例，如 "16:9", "1:1", "9:16" 等
+            image_options: 图片选项，包含比例等信息
         """
         if mode == "image":
-            return await self._select_image_mode(aspect_ratio)
+            return await self._select_image_mode(image_options)
         return True
 
     async def _handle_upload(self, file_path: str | None) -> bool:
@@ -1485,7 +1486,7 @@ class QwenAnonymousClient:
         timeout_sec: int = 120,
         mode: str | None = None,
         file_path: str | None = None,
-        aspect_ratio: str | None = None,
+        image_options: dict | None = None,
     ) -> AnonymousResponse:
         """发送消息并等待完整回复
 
@@ -1494,7 +1495,7 @@ class QwenAnonymousClient:
             timeout_sec: 超时时间（秒）
             mode: "image" 切换到图片生成模式，None 为普通聊天
             file_path: 要上传的文件路径（支持图片、文档等），None 表示不上传
-            aspect_ratio: 图片比例，如 "16:9", "1:1", "9:16" 等
+            image_options: 图片选项，包含比例等信息
         """
         if not await self._ensure_ready():
             return AnonymousResponse(content="", success=False, error="浏览器启动失败")
@@ -1506,7 +1507,7 @@ class QwenAnonymousClient:
         self._page = page
 
         try:
-            return await self._do_chat(message, timeout_sec, mode, file_path, aspect_ratio)
+            return await self._do_chat(message, timeout_sec, mode, file_path, image_options)
         finally:
             self._page = None
 
@@ -1516,14 +1517,14 @@ class QwenAnonymousClient:
         timeout_sec: int = 120,
         mode: str | None = None,
         file_path: str | None = None,
-        aspect_ratio: str | None = None,
+        image_options: dict  | None = None,
     ) -> AnonymousResponse:
         """chat 核心逻辑（页签已从池中获取）"""
         # 关闭弹窗/遮罩（在输入前）
         await self._dismiss_login_popup()
 
         # 切换模式
-        if not await self._ensure_mode(mode, aspect_ratio):
+        if not await self._ensure_mode(mode, image_options):
             return AnonymousResponse(content="", success=False, error="切换图片生成模式失败")
 
         # 上传文件（多模态）
@@ -1567,7 +1568,7 @@ class QwenAnonymousClient:
         timeout_sec: int = 120,
         mode: str | None = None,
         file_path: str | None = None,
-        aspect_ratio: str | None = None,
+        image_options: dict | None = None,
     ) -> AsyncIterator[dict]:
         """流式聊天 — yield {"content": str} / {"done": True} / {"error": str}
 
@@ -1576,7 +1577,7 @@ class QwenAnonymousClient:
             timeout_sec: 超时时间（秒）
             mode: "image" 切换到图片生成模式，None 为普通聊天
             file_path: 要上传的文件路径（支持图片、文档等），None 表示不上传
-            aspect_ratio: 图片比例，如 "16:9", "1:1", "9:16" 等
+            image_options: 图片选项，包含比例等信息
         """
         log.info(f"[Anonymous] chat_stream 开始 mode={mode} timeout={timeout_sec}s")
         if not await self._ensure_ready():
@@ -1591,7 +1592,7 @@ class QwenAnonymousClient:
         self._page = page
 
         try:
-            async for chunk in self._do_stream(message, timeout_sec, mode, file_path, aspect_ratio):
+            async for chunk in self._do_stream(message, timeout_sec, mode, file_path, image_options):
                 yield chunk
         finally:
             self._page = None
@@ -1602,14 +1603,14 @@ class QwenAnonymousClient:
         timeout_sec: int = 120,
         mode: str | None = None,
         file_path: str | None = None,
-        aspect_ratio: str | None = None,
+        image_options: dict | None = None,
     ) -> AsyncIterator[dict]:
         """chat_stream 核心逻辑 — 真流式（页签已从池中获取）"""
         # 关闭弹窗/遮罩（在输入前）
         await self._dismiss_login_popup()
 
         # 切换模式
-        if not await self._ensure_mode(mode, aspect_ratio):
+        if not await self._ensure_mode(mode, image_options):
             yield {"error": "切换图片生成模式失败"}
             return
 

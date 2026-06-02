@@ -5,7 +5,7 @@ import logging
 
 from backend.core.request_logging import request_context
 
-log = logging.getLogger("Web2API.context_cleanup")
+log = logging.getLogger("web2api.context_cleanup")
 
 
 async def context_cleanup_loop(app, interval_seconds: int = 300):
@@ -21,10 +21,11 @@ async def context_cleanup_loop(app, interval_seconds: int = 300):
                     if not acc:
                         continue
                     if record.chat_id:
-                        try:
-                            await app.state.qwen_client.delete_chat(acc.token, record.chat_id)
-                        except Exception as exc:
-                            log.debug("[ContextCleanup] chat delete failed session=%s chat_id=%s error=%s", record.session_key, record.chat_id, exc)
+                        await app.state.qwen_client.delete_chat_reliable(
+                            acc.token,
+                            record.chat_id,
+                            source="context_cleanup",
+                        )
                     for remote_meta in record.uploaded_files:
                         try:
                             await app.state.upstream_file_uploader.delete_remote_file(acc, remote_meta)

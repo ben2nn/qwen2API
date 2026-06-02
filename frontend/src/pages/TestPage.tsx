@@ -34,6 +34,26 @@ interface ImageGenerationResponse {
   error?: unknown
 }
 
+type ModelCapability = {
+  thinking?: boolean
+  search?: boolean
+  vision?: boolean
+  deep_research?: boolean
+  image_gen?: boolean
+  video_gen?: boolean
+  web_dev?: boolean
+  slides?: boolean
+}
+
+type ModelOption = {
+  id: string
+  base_model?: string
+  family?: string
+  mode?: string
+  display_name?: string
+  capabilities?: ModelCapability
+}
+
 // ─── 工具函数 ───────────────────────────────────────────────────────────────
 
 /** 压缩图片到合理大小，返回 data: URI */
@@ -73,6 +93,177 @@ function extractImageUrls(content: MessageContent): string[] {
   return content
     .filter(p => p.type === "image_url" && p.image_url?.url)
     .map(p => p.image_url!.url)
+}
+
+// ─── 模型相关工具函数 ──────────────────────────────────────────────────────
+
+const MODEL_MODE_SUFFIX_RE = /-(thinking|deep-research|deep_research|image|video|webdev|web-dev|slides|t2i|t2v)$/i
+const CAPABILITY_LABELS: Array<{ key: keyof ModelCapability; label: string }> = [
+  { key: "thinking", label: "思考" },
+  { key: "search", label: "搜索" },
+  { key: "vision", label: "视觉" },
+  { key: "deep_research", label: "研究" },
+  { key: "image_gen", label: "图片" },
+  { key: "video_gen", label: "视频" },
+  { key: "web_dev", label: "建站" },
+  { key: "slides", label: "PPT" },
+]
+
+function asText(value: unknown): string {
+  return typeof value === "string" ? value : ""
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? value as Record<string, unknown> : {}
+}
+
+function normalizeModelOption(value: unknown): ModelOption | null {
+  if (typeof value === "string" && value) return { id: value, capabilities: {} }
+  const record = asRecord(value)
+  const id = asText(record.id)
+  if (!id) return null
+  return {
+    id,
+    base_model: asText(record.base_model) || undefined,
+    family: asText(record.family) || undefined,
+    mode: asText(record.mode) || undefined,
+    display_name: asText(record.display_name) || undefined,
+    capabilities: asRecord(record.capabilities) as ModelCapability,
+  }
+}
+
+function isBaseModelOption(option: ModelOption): boolean {
+  return option.base_model ? option.id === option.base_model : !MODEL_MODE_SUFFIX_RE.test(option.id)
+}
+
+function isThinkingVariant(modelId: string): boolean {
+  return /-thinking$/i.test(modelId)
+}
+
+function capabilityBadges(option?: ModelOption): string[] {
+  if (!option?.capabilities) return []
+  return CAPABILITY_LABELS.filter(item => option.capabilities?.[item.key]).map(item => item.label)
+}
+
+function formatModelOption(option: ModelOption): string {
+  return option.display_name || option.id
+}
+
+const FEATURE_MODES: Array<{ mode: InputMode; label: string; icon: string; capKey: keyof ModelCapability }> = [
+  { mode: "deep_research", label: "深入研究", icon: "🔬", capKey: "deep_research" },
+  { mode: "video",         label: "创建视频", icon: "🎬", capKey: "video_gen" },
+  { mode: "web_dev",       label: "网页开发", icon: "💻", capKey: "web_dev" },
+  { mode: "slides",        label: "幻灯片",   icon: "📊", capKey: "slides" },
+  { mode: "search",        label: "网页搜索", icon: "🔍", capKey: "search" },
+]
+
+function findModelByCapability(models: ModelOption[], capKey: keyof ModelCapability): ModelOption | undefined {
+  return models.find(m => m.capabilities?.[capKey])
+}
+
+function chooseDefaultModel(options: ModelOption[], currentModel?: string): string {
+  if (currentModel && options.some(option => option.id === currentModel)) return currentModel
+  const preferred = options.find(option => option.id === "qwen3.6-plus")
+  if (preferred) return preferred.id
+  const base = options.find(isBaseModelOption)
+  return base?.id || options[0]?.id || "qwen3.6-plus"
+}
+
+
+function extractTextFromContent(content: unknown): string {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+  return content
+    .map(part => {
+      const block = asRecord(part)
+      const type = asText(block.type)
+      if (type === "thinking" || type === "reasoning" || type === "reasoning_text") {
+        return ""
+      }
+      if (type === "text" || type === "output_text" || type === "message") {
+        return asText(block.text) || asText(block.content)
+      }
+      return asText(block.text) || asText(block.content)
+    })
+    .join("")
+}
+
+function readReasoningFields(value: unknown): string {
+  const record = asRecord(value)
+  const extra = asRecord(record.extra)
+  return (
+    asText(record.reasoning_content) ||
+    asText(record.reasoning) ||
+    asText(record.reasoning_text) ||
+    asText(record.thinking) ||
+    asText(record.thoughts) ||
+    asText(extra.reasoning_content) ||
+    asText(extra.reasoning) ||
+    asText(extra.reasoning_text) ||
+    asText(extra.thinking) ||
+    asText(extra.thoughts)
+  )
+}
+
+function splitInlineThinking(content: string, reasoning = ""): { content: string; reasoning: string } {
+  if (!content || !/<think[\s>]/i.test(content)) return { content, reasoning }
+  let visible = ""
+  let thoughts = reasoning
+  let cursor = 0
+  for (const match of content.matchAll(/<think[^>]*>([\s\S]*?)<\/think>/gi)) {
+    visible += content.slice(cursor, match.index)
+    thoughts += match[1] || ""
+    cursor = (match.index ?? 0) + match[0].length
+  }
+  visible += content.slice(cursor)
+  return { content: visible, reasoning: thoughts }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => window.setTimeout(resolve, ms))
+}
+
+function extractReasoningFromContent(content: unknown): string {
+  if (!Array.isArray(content)) return ""
+  return content
+    .map(part => {
+      const block = asRecord(part)
+      const type = block.type
+      if (type === "thinking") return asText(block.thinking)
+      if (type === "reasoning_text") return asText(block.text)
+      if (type === "reasoning") return asText(block.text) || asText(block.reasoning)
+      return readReasoningFields(block)
+    })
+    .join("")
+}
+
+function normalizeAssistantMessage(message: unknown): ChatMessage {
+  const msg = asRecord(message)
+  const inline = splitInlineThinking(extractTextFromContent(msg.content), readReasoningFields(msg) || extractReasoningFromContent(msg.content))
+  return {
+    role: asText(msg.role) || "assistant",
+    content: inline.content,
+    ...(inline.reasoning ? { reasoning: inline.reasoning } : {}),
+  }
+}
+
+function extractStreamDelta(payload: unknown): { content: string; reasoning: string } {
+  const data = asRecord(payload)
+  const responseEventType = asText(data.type)
+  if (responseEventType === "response.reasoning_text.delta") {
+    return { content: "", reasoning: asText(data.delta) }
+  }
+  if (responseEventType === "response.output_text.delta") {
+    return splitInlineThinking(asText(data.delta))
+  }
+
+  const choices = Array.isArray(data.choices) ? data.choices : []
+  const choice = asRecord(choices[0])
+  const delta = asRecord(choice.delta)
+  const message = asRecord(choice.message)
+  const content = extractTextFromContent(delta.content) || extractTextFromContent(message.content) || extractTextFromContent(data.content)
+  const reasoning = readReasoningFields(delta) || readReasoningFields(message) || readReasoningFields(data) || extractReasoningFromContent(delta.content) || extractReasoningFromContent(message.content)
+  return splitInlineThinking(content, reasoning)
 }
 
 // ─── 消息内容渲染组件 ──────────────────────────────────────────────────────
@@ -144,6 +335,10 @@ function UserMessageDisplay({ content }: { content: MessageContent }) {
 
 // ─── 常量 ────────────────────────────────────────────────────────────────────
 
+const TYPEWRITER_CHUNK_SIZE = 2
+const TYPEWRITER_DELAY_MS = 24
+const FALLBACK_MODELS: ModelOption[] = [{ id: "qwen3.6-plus", base_model: "qwen3.6-plus", family: "qwen3.6", mode: "chat", capabilities: {} }]
+
 const ASPECT_RATIOS = [
   { label: "1:1",  value: "1:1"  },
   { label: "16:9", value: "16:9" },
@@ -152,7 +347,7 @@ const ASPECT_RATIOS = [
   { label: "3:4",  value: "3:4"  },
 ]
 
-type InputMode = "chat" | "image"
+type InputMode = "chat" | "image" | "deep_research" | "video" | "web_dev" | "slides" | "search"
 
 // ─── 主页面组件 ─────────────────────────────────────────────────────────────
 
@@ -162,8 +357,9 @@ export default function TestPage() {
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([])
   const [loading, setLoading] = useState(false)
   const [model, setModel] = useState("qwen3.6-plus")
-  const [availableModels, setAvailableModels] = useState<string[]>(["qwen3.6-plus"])
+  const [availableModels, setAvailableModels] = useState<ModelOption[]>(FALLBACK_MODELS)
   const [stream, setStream] = useState(true)
+  const [answerMode, setAnswerMode] = useState<"auto" | "thinking" | "fast">("auto")
   const [inputMode, setInputMode] = useState<InputMode>("chat")
   const [imageRatio, setImageRatio] = useState("16:9")
   const [showMenu, setShowMenu] = useState(false)
@@ -173,6 +369,10 @@ export default function TestPage() {
   const dropZoneRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
+  const selectedModel = availableModels.find(option => option.id === model)
+  const selectedBadges = capabilityBadges(selectedModel)
+  const selectedForcesThinking = isThinkingVariant(model)
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [messages])
@@ -181,22 +381,20 @@ export default function TestPage() {
   useEffect(() => {
     (async () => {
       try {
-        const headers = getAuthHeader()
-        const r = await fetch(`${API_BASE}/v1/models`, { headers })
+        const r = await fetch(`${API_BASE}/v1/models`, { headers: getAuthHeader() })
         if (!r.ok) return
         const j = await r.json()
-        const ids = (j?.data || [])
-          .map((m: { id?: string }) => m?.id)
-          .filter((id: unknown): id is string => typeof id === "string" && !!id)
-        if (ids.length) {
-          setAvailableModels(ids)
-          if (!ids.includes(model)) setModel(ids[0])
+        const options = (j?.data || [])
+          .map(normalizeModelOption)
+          .filter((item: ModelOption | null): item is ModelOption => Boolean(item?.id))
+        if (options.length) {
+          setAvailableModels(options)
+          setModel(current => chooseDefaultModel(options, current))
         }
       } catch {
         // keep fallback list
       }
     })()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // 点击外部关闭菜单
@@ -296,126 +494,38 @@ export default function TestPage() {
     return parts
   }, [])
 
-  // ─── 发送消息（统一入口，根据 inputMode 分流）──────────────────────────
+  // ─── 流式响应处理 ──────────────────────────────────────────────────────
 
-  const handleSend = async () => {
-    const text = input.trim()
-    if ((!text && attachedImages.length === 0) || loading) return
-
-    // 图片生成模式
-    if (inputMode === "image") {
-      await handleImageGenerate(text)
-      return
-    }
-
-    // 聊天模式
-    const content = await buildContentParts(text, attachedImages)
-    const userMsg: ChatMessage = { role: "user", content }
-    setMessages(prev => [...prev, userMsg])
-    setInput("")
-    setAttachedImages([])
-    setLoading(true)
-
-    try {
-      const apiMessages = [...messages, userMsg].map(m => ({
-        role: m.role,
-        content: m.content,
-      }))
-
-      if (!stream) {
-        const res = await fetch(`${API_BASE}/v1/chat/completions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...getAuthHeader() },
-          body: JSON.stringify({ model, messages: apiMessages, stream: false })
-        })
-        const data = await res.json()
-        if (data.error) {
-          setMessages(prev => [...prev, { role: "assistant", content: `❌ ${data.error}`, error: true }])
-        } else if (data.choices?.[0]) {
-          setMessages(prev => [...prev, data.choices[0].message])
-        } else {
-          setMessages(prev => [...prev, { role: "assistant", content: `❌ 未知响应: ${JSON.stringify(data)}`, error: true }])
-        }
-      } else {
-        const res = await fetch(`${API_BASE}/v1/chat/completions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...getAuthHeader() },
-          body: JSON.stringify({ model, messages: apiMessages, stream: true })
-        })
-
-        if (!res.ok) {
-          const errText = await res.text()
-          setMessages(prev => [...prev, { role: "assistant", content: `❌ HTTP ${res.status}: ${errText}`, error: true }])
-          return
-        }
-
-        if (!res.body) throw new Error("No response body")
-
-        setMessages(prev => [...prev, { role: "assistant", content: "" }])
-        const reader = res.body.getReader()
-        const decoder = new TextDecoder()
-        let hasContent = false
-        let streamDone = false
-
-        while (!streamDone) {
-          const { done, value } = await reader.read()
-          if (done) break
-
-          const chunk = decoder.decode(value, { stream: true })
-          for (const rawLine of chunk.split("\n")) {
-            const line = rawLine.trim()
-            if (!line || line.startsWith(":")) continue
-            if (line === "data: [DONE]") {
-              streamDone = true
-              await reader.cancel().catch(() => undefined)
-              break
-            }
-            if (line.startsWith("data: ")) {
-              try {
-                const data = JSON.parse(line.slice(6))
-                if (data.error) {
-                  setMessages(prev => {
-                    const msgs = [...prev]
-                    msgs[msgs.length - 1] = { role: "assistant", content: `❌ ${data.error}`, error: true }
-                    return msgs
-                  })
-                  hasContent = true
-                  break
-                }
-                const content: string = data.choices?.[0]?.delta?.content ?? ""
-                const reasoning: string = data.choices?.[0]?.delta?.reasoning_content ?? ""
-                if (content || reasoning) {
-                  hasContent = true
-                  setMessages(prev => {
-                    const msgs = [...prev]
-                    const last = msgs[msgs.length - 1]
-                    msgs[msgs.length - 1] = {
-                      ...last,
-                      content: (typeof last.content === "string" ? last.content : extractText(last.content)) + content,
-                      reasoning: (last.reasoning || "") + reasoning,
-                    }
-                    return msgs
-                  })
-                }
-              } catch { /* skip */ }
-            }
-          }
-        }
-
-        if (!hasContent) {
-          setMessages(prev => {
-            const msgs = [...prev]
-            msgs[msgs.length - 1] = { role: "assistant", content: "❌ 响应为空（账号可能未激活或无可用账号）", error: true }
-            return msgs
-          })
-        }
+  const appendAssistantDelta = (content: string, reasoning: string) => {
+    if (!content && !reasoning) return
+    setMessages(prev => {
+      const msgs = [...prev]
+      const last = msgs[msgs.length - 1] ?? { role: "assistant", content: "" }
+      const currentText = typeof last.content === "string" ? last.content : extractText(last.content)
+      msgs[msgs.length - 1] = {
+        ...last,
+        content: currentText + content,
+        reasoning: (last.reasoning || "") + reasoning,
       }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "未知错误"
-      toast.error(`网络错误: ${message}`)
-      setMessages(prev => [...prev, { role: "assistant", content: `❌ 网络错误: ${message}`, error: true }])
-    } finally {
-      setLoading(false)
+      return msgs
+    })
+  }
+
+  const appendAssistantTypewriter = async (message: ChatMessage) => {
+    setMessages(prev => [...prev, { role: "assistant", content: "" }])
+    let pendingReasoning = message.reasoning || ""
+    let pendingContent = typeof message.content === "string" ? message.content : extractText(message.content)
+    while (pendingReasoning || pendingContent) {
+      if (pendingReasoning) {
+        const chunk = pendingReasoning.slice(0, TYPEWRITER_CHUNK_SIZE)
+        pendingReasoning = pendingReasoning.slice(chunk.length)
+        appendAssistantDelta("", chunk)
+      } else {
+        const chunk = pendingContent.slice(0, TYPEWRITER_CHUNK_SIZE)
+        pendingContent = pendingContent.slice(chunk.length)
+        appendAssistantDelta(chunk, "")
+      }
+      await sleep(TYPEWRITER_DELAY_MS)
     }
   }
 
@@ -425,7 +535,6 @@ export default function TestPage() {
     if (!prompt && attachedImages.length === 0) return
     setLoading(true)
     try {
-      // 构建请求体
       const requestBody: Record<string, unknown> = {
         model: "dall-e-3",
         prompt: prompt || "根据参考图生成",
@@ -434,7 +543,6 @@ export default function TestPage() {
         response_format: "url",
       }
 
-      // 如果有附件，添加到请求中
       if (attachedImages.length > 0) {
         const images: string[] = []
         for (const img of attachedImages) {
@@ -466,7 +574,6 @@ export default function TestPage() {
         return
       }
 
-      // 构建用户消息内容（包含参考图）
       let userContent: MessageContent = `🎨 生成图片：${prompt || "根据参考图生成"}`
       if (attachedImages.length > 0) {
         const parts: ContentPart[] = []
@@ -498,6 +605,212 @@ export default function TestPage() {
     }
   }
 
+  // ─── 发送消息（统一入口，根据 inputMode 分流）──────────────────────────
+
+  const handleSend = async () => {
+    const text = input.trim()
+    if ((!text && attachedImages.length === 0) || loading) return
+
+    // 图片生成模式
+    if (inputMode === "image") {
+      await handleImageGenerate(text)
+      return
+    }
+
+    // 聊天模式
+    const content = await buildContentParts(text, attachedImages)
+    const userMsg: ChatMessage = { role: "user", content }
+    const wantsThinking = answerMode === "thinking"
+    const isAuto = answerMode === "auto"
+    const requestBody: Record<string, unknown> = {
+      model,
+      messages: [...messages, userMsg],
+      stream,
+    }
+    if (!isAuto) {
+      requestBody.include_reasoning = wantsThinking
+      requestBody.enable_thinking = wantsThinking
+    }
+    if (!wantsThinking && !isAuto && selectedForcesThinking) {
+      toast.info("该模型为强制思考变体，快速模式不会生效")
+    }
+    setMessages(prev => [...prev, userMsg])
+    setInput("")
+    setAttachedImages([])
+    setLoading(true)
+
+    try {
+      if (!stream) {
+        const res = await fetch(`${API_BASE}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...getAuthHeader() },
+          body: JSON.stringify({ ...requestBody, stream: false })
+        })
+        const data = await res.json()
+        if (data.error) {
+          setMessages(prev => [...prev, { role: "assistant", content: `❌ ${data.error}`, error: true }])
+        } else if (data.choices?.[0]) {
+          await appendAssistantTypewriter(normalizeAssistantMessage(data.choices[0].message))
+        } else {
+          setMessages(prev => [...prev, { role: "assistant", content: `❌ 未知响应: ${JSON.stringify(data)}`, error: true }])
+        }
+      } else {
+        const res = await fetch(`${API_BASE}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...getAuthHeader() },
+          body: JSON.stringify({ ...requestBody, stream: true })
+        })
+
+        if (!res.ok) {
+          const errText = await res.text()
+          setMessages(prev => [...prev, { role: "assistant", content: `❌ HTTP ${res.status}: ${errText}`, error: true }])
+          return
+        }
+
+        if (!res.body) throw new Error("No response body")
+
+        setMessages(prev => [...prev, { role: "assistant", content: "" }])
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let hasContent = false
+        let hasTerminalError = false
+        const outputQueue = { content: "", reasoning: "" }
+        let typewriterRunning = false
+
+        const runTypewriter = async () => {
+          if (typewriterRunning) return
+          typewriterRunning = true
+          try {
+            while (outputQueue.reasoning || outputQueue.content) {
+              if (outputQueue.reasoning) {
+                const chunk = outputQueue.reasoning.slice(0, TYPEWRITER_CHUNK_SIZE)
+                outputQueue.reasoning = outputQueue.reasoning.slice(chunk.length)
+                appendAssistantDelta("", chunk)
+              } else {
+                const chunk = outputQueue.content.slice(0, TYPEWRITER_CHUNK_SIZE)
+                outputQueue.content = outputQueue.content.slice(chunk.length)
+                appendAssistantDelta(chunk, "")
+              }
+              await sleep(TYPEWRITER_DELAY_MS)
+            }
+          } finally {
+            typewriterRunning = false
+            if (outputQueue.reasoning || outputQueue.content) void runTypewriter()
+          }
+        }
+
+        const enqueueAssistantDelta = (content: string, reasoning: string) => {
+          if (!content && !reasoning) return
+          hasContent = true
+          outputQueue.content += content
+          outputQueue.reasoning += reasoning
+          void runTypewriter()
+        }
+
+        const waitForTypewriter = async () => {
+          while (typewriterRunning || outputQueue.reasoning || outputQueue.content) {
+            await sleep(20)
+          }
+        }
+
+        let currentEventData = ""
+
+        const processSsePayload = (payload: string) => {
+          const trimmedPayload = payload.trim()
+          if (!trimmedPayload || trimmedPayload === "[DONE]") return
+
+          try {
+            const data = JSON.parse(trimmedPayload)
+            if (data.error) {
+              outputQueue.content = ""
+              outputQueue.reasoning = ""
+              setMessages(prev => {
+                const msgs = [...prev]
+                msgs[msgs.length - 1] = { role: "assistant", content: `❌ ${data.error}`, error: true }
+                return msgs
+              })
+              hasContent = true
+              hasTerminalError = true
+              return
+            }
+            const { content, reasoning } = extractStreamDelta(data)
+            enqueueAssistantDelta(content, reasoning)
+          } catch {
+            // Keep the test page resilient to malformed payloads without aborting the stream.
+          }
+        }
+
+        let buffer = ""
+
+        const dispatchSseEvent = () => {
+          if (!currentEventData) return
+          const payload = currentEventData
+          currentEventData = ""
+          processSsePayload(payload)
+        }
+
+        const processSseLine = (rawLine: string) => {
+          const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine
+          if (line === "") {
+            dispatchSseEvent()
+            return
+          }
+          if (line.startsWith(":")) return
+          if (!line.startsWith("data:")) return
+
+          const data = line.startsWith("data: ") ? line.slice(6) : line.slice(5)
+          currentEventData += currentEventData ? `\n${data}` : data
+        }
+
+        const processSseChunk = (chunk: string) => {
+          if (!chunk) return
+          buffer += chunk
+          const lines = buffer.split("\n")
+          buffer = lines.pop() ?? ""
+          for (const line of lines) {
+            processSseLine(line)
+            if (hasTerminalError) break
+          }
+        }
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          processSseChunk(decoder.decode(value, { stream: true }))
+          if (hasTerminalError) break
+        }
+
+        if (!hasTerminalError) {
+          processSseChunk(decoder.decode())
+          if (buffer) {
+            processSseLine(buffer)
+            buffer = ""
+          }
+          dispatchSseEvent()
+        } else {
+          decoder.decode()
+        }
+
+        await waitForTypewriter()
+
+        if (!hasContent) {
+          setMessages(prev => {
+            const msgs = [...prev]
+            msgs[msgs.length - 1] = { role: "assistant", content: "❌ 响应为空（账号可能未激活或无可用账号）", error: true }
+            return msgs
+          })
+        }
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "未知错误"
+      toast.error(`网络错误: ${message}`)
+      setMessages(prev => [...prev, { role: "assistant", content: `❌ 网络错误: ${message}`, error: true }])
+    } finally {
+      setLoading(false)
+    }
+  }
+
   // ─── 键盘快捷键 ──────────────────────────────────────────────────────
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -523,29 +836,41 @@ export default function TestPage() {
         }}
       />
 
-      <div className="flex justify-between items-center">
-        <div>
-          <h2 className="text-2xl font-bold tracking-tight">接口测试</h2>
-          <p className="text-muted-foreground">支持文本、图片输入和图片生成。</p>
-        </div>
-        <div className="flex gap-4 items-center">
-          <div className="flex items-center gap-2 text-sm bg-card border px-3 py-1.5 rounded-md">
-            <span className="font-medium text-muted-foreground">模型:</span>
-            <select value={model} onChange={e => setModel(e.target.value)} className="bg-transparent font-mono outline-none">
-              {availableModels.map(id => (
-                <option key={id} value={id}>{id}</option>
+      {/* 精简 header */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-bold tracking-tight">接口测试</h2>
+          <div className="flex items-center gap-2 rounded-xl border bg-card/80 px-3 py-1.5 text-sm">
+            <select value={model} onChange={e => setModel(e.target.value)} className="max-w-[16rem] bg-transparent font-mono outline-none text-sm">
+              {availableModels.filter(isBaseModelOption).map(option => (
+                <option key={option.id} value={option.id}>{formatModelOption(option)}</option>
               ))}
             </select>
           </div>
-          <div
-            className="flex items-center gap-2 text-sm bg-card border px-3 py-1.5 rounded-md cursor-pointer"
-            onClick={() => setStream(!stream)}
-          >
-            <input type="checkbox" checked={stream} onChange={() => {}} className="cursor-pointer" />
-            <span className="font-medium">流式传输 (Stream)</span>
-          </div>
-          <Button variant="outline" onClick={() => setMessages([])}>
-            <RefreshCw className="mr-2 h-4 w-4" /> 清空对话
+        </div>
+        <div className="flex items-center gap-2">
+          {inputMode === "image" && (
+            <div className="flex items-center gap-1.5 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-1.5">
+              <Wand2 className="h-3 w-3 text-primary" />
+              <span className="text-xs font-medium text-primary">比例</span>
+              <select
+                value={imageRatio}
+                onChange={e => setImageRatio(e.target.value)}
+                className="bg-transparent border-0 text-xs text-primary font-medium outline-none cursor-pointer"
+                disabled={loading}
+              >
+                {ASPECT_RATIOS.map(r => (
+                  <option key={r.value} value={r.value}>{r.label}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          <label className="flex cursor-pointer items-center gap-1.5 rounded-lg border bg-card/80 px-2.5 py-1.5 text-sm">
+            <input type="checkbox" checked={stream} onChange={() => setStream(!stream)} className="cursor-pointer" />
+            <span>流式</span>
+          </label>
+          <Button variant="outline" size="sm" onClick={() => { setMessages([]); setInput(""); setAttachedImages([]) }}>
+            <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> 新建
           </Button>
         </div>
       </div>
@@ -604,7 +929,7 @@ export default function TestPage() {
         <div
           ref={dropZoneRef}
           className={`mx-4 mb-4 rounded-2xl border transition-all ${
-            inputMode === "image" ? "border-primary/30 bg-primary/5" : "border-border bg-background"
+            inputMode !== "chat" ? "border-primary/30 bg-primary/5" : "border-border bg-background"
           }`}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
@@ -646,9 +971,11 @@ export default function TestPage() {
               placeholder={
                 inputMode === "image"
                   ? "描述你想生成的图片..."
-                  : attachedImages.length > 0
-                    ? "添加说明或直接发送图片..."
-                    : "输入消息..."
+                  : inputMode !== "chat"
+                    ? `输入内容，使用${FEATURE_MODES.find(f => f.mode === inputMode)?.label || ""}模式...`
+                    : attachedImages.length > 0
+                      ? "添加说明或直接发送图片..."
+                      : "输入消息..."
               }
               disabled={loading}
               style={{ height: 'auto' }}
@@ -677,7 +1004,8 @@ export default function TestPage() {
 
                 {/* 弹出菜单 */}
                 {showMenu && (
-                  <div className="absolute bottom-full left-0 mb-2 w-44 rounded-xl border bg-card shadow-lg overflow-hidden animate-in fade-in slide-in-from-bottom-1 duration-150">
+                  <div className="absolute bottom-full left-0 mb-2 w-48 rounded-xl border bg-card shadow-lg overflow-hidden animate-in fade-in slide-in-from-bottom-1 duration-150">
+                    {/* 附件上传 */}
                     <button
                       className="flex items-center gap-3 w-full px-4 py-2.5 text-sm text-foreground hover:bg-muted/60 transition-colors"
                       onClick={() => {
@@ -689,6 +1017,7 @@ export default function TestPage() {
                       <span>附件上传</span>
                     </button>
                     <div className="border-t border-border/50" />
+                    {/* 图片生成 */}
                     <button
                       className={`flex items-center gap-3 w-full px-4 py-2.5 text-sm transition-colors ${
                         inputMode === "image"
@@ -697,64 +1026,103 @@ export default function TestPage() {
                       }`}
                       onClick={() => {
                         setShowMenu(false)
-                        setInputMode(inputMode === "chat" ? "image" : "chat")
+                        if (inputMode === "image") {
+                          setInputMode("chat")
+                        } else {
+                          setInputMode("image")
+                        }
                       }}
                     >
                       <Wand2 className={`h-4 w-4 ${inputMode === "image" ? "text-primary" : "text-muted-foreground"}`} />
                       <span>图片生成</span>
                     </button>
+                    <div className="border-t border-border/50" />
+                    {/* 功能模式 */}
+                    {FEATURE_MODES.map(f => (
+                      <button
+                        key={f.mode}
+                        className={`flex items-center gap-3 w-full px-4 py-2.5 text-sm transition-colors ${
+                          inputMode === f.mode
+                            ? "text-primary bg-primary/5 hover:bg-primary/10"
+                            : "text-foreground hover:bg-muted/60"
+                        }`}
+                        onClick={() => {
+                          setShowMenu(false)
+                          if (inputMode === f.mode) {
+                            setInputMode("chat")
+                            return
+                          }
+                          const target = findModelByCapability(availableModels, f.capKey)
+                          if (target) {
+                            setModel(target.id)
+                            setInputMode(f.mode)
+                          } else {
+                            toast.info(`没有可用的「${f.label}」模型`)
+                          }
+                        }}
+                      >
+                        <span className="text-sm">{f.icon}</span>
+                        <span>{f.label}</span>
+                      </button>
+                    ))}
                   </div>
                 )}
               </div>
 
-              {/* 图片模式指示器 + 比例下拉 */}
-              {inputMode === "image" && (
-                <div className="flex items-center gap-1.5 ml-1">
-                  <div className="flex items-center gap-1 px-2 py-1 rounded-md bg-primary/10 text-primary">
+              {/* 当前功能模式标签 */}
+              {inputMode !== "chat" && (
+                <button
+                  className="flex items-center gap-1 px-2 py-1 ml-1 rounded-md bg-primary/10 text-primary hover:bg-primary/15 transition-colors"
+                  onClick={() => setInputMode("chat")}
+                  title="点击退出此模式"
+                >
+                  {inputMode === "image" ? (
                     <Wand2 className="h-3 w-3" />
-                    <span className="text-xs font-medium">图片生成</span>
-                    <button
-                      onClick={() => setInputMode("chat")}
-                      className="ml-0.5 p-0.5 rounded hover:bg-primary/20 transition-colors"
-                      title="退出图片生成"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </div>
-                  <select
-                    value={imageRatio}
-                    onChange={e => setImageRatio(e.target.value)}
-                    className="px-2 py-1 rounded-md bg-primary/10 border-0 text-xs text-primary font-medium outline-none cursor-pointer hover:bg-primary/15 transition-colors"
-                    disabled={loading}
-                  >
-                    {ASPECT_RATIOS.map(r => (
-                      <option key={r.value} value={r.value}>{r.label}</option>
-                    ))}
-                  </select>
-                </div>
+                  ) : (
+                    <span className="text-xs">{FEATURE_MODES.find(f => f.mode === inputMode)?.icon}</span>
+                  )}
+                  <span className="text-xs font-medium">
+                    {inputMode === "image" ? "图片生成" : FEATURE_MODES.find(f => f.mode === inputMode)?.label}
+                  </span>
+                  <X className="h-2.5 w-2.5 opacity-60" />
+                </button>
               )}
             </div>
 
-            {/* 发送按钮 */}
-            <button
-              onClick={handleSend}
-              disabled={loading || (!input.trim() && attachedImages.length === 0)}
-              className={`p-2 rounded-lg transition-all ${
-                loading || (!input.trim() && attachedImages.length === 0)
-                  ? "text-muted-foreground/40 cursor-not-allowed"
-                  : inputMode === "image"
-                    ? "bg-primary text-primary-foreground hover:bg-primary/90"
-                    : "bg-foreground text-background hover:bg-foreground/90"
-              }`}
-            >
-              {loading ? (
-                <RefreshCw className="h-4 w-4 animate-spin" />
-              ) : inputMode === "image" ? (
-                <Wand2 className="h-4 w-4" />
-              ) : (
-                <Send className="h-4 w-4" />
-              )}
-            </button>
+            <div className="flex items-center gap-1">
+              {/* 模式选择 */}
+              <select
+                value={answerMode}
+                onChange={e => setAnswerMode(e.target.value as "auto" | "thinking" | "fast")}
+                disabled={loading}
+                className="bg-muted/60 border-0 rounded-lg text-xs font-medium px-2.5 py-1.5 outline-none cursor-pointer hover:bg-muted transition-colors"
+              >
+                <option value="auto">自动</option>
+                <option value="thinking">思考</option>
+                <option value="fast">快速</option>
+              </select>
+
+              {/* 发送按钮 */}
+              <button
+                onClick={handleSend}
+                disabled={loading || (!input.trim() && attachedImages.length === 0)}
+                className={`p-2 rounded-lg transition-all ${
+                  loading || (!input.trim() && attachedImages.length === 0)
+                    ? "text-muted-foreground/40 cursor-not-allowed"
+                    : inputMode === "image"
+                      ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                      : "bg-foreground text-background hover:bg-foreground/90"
+                }`}
+              >
+                {loading ? (
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                ) : inputMode === "image" ? (
+                  <Wand2 className="h-4 w-4" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
+              </button>
+            </div>
           </div>
         </div>
       </div>

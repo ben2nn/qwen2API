@@ -10,7 +10,7 @@ import time
 from typing import AsyncIterator, Optional
 from dataclasses import dataclass
 
-log = logging.getLogger("Web2API.browser_chat")
+log = logging.getLogger("web2api.browser_chat")
 
 BASE_URL = "https://chat.qwen.ai"
 

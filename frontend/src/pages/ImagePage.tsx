@@ -6,22 +6,31 @@ import { getAuthHeader } from "../lib/auth"
 import { API_BASE } from "../lib/api"
 
 const ASPECT_RATIOS = [
-  { label: "1:1",  value: "1:1"  },
-  { label: "16:9", value: "16:9" },
-  { label: "9:16", value: "9:16" },
-  { label: "4:3",  value: "4:3"  },
-  { label: "3:4",  value: "3:4"  },
+  { label: "1:1",  value: "1:1",   w: 1328, h: 1328 },
+  { label: "16:9", value: "16:9",  w: 1664, h: 928  },
+  { label: "9:16", value: "9:16",  w: 928,  h: 1664 },
+  { label: "4:3",  value: "4:3",   w: 1472, h: 1140 },
+  { label: "3:4",  value: "3:4",   w: 1140, h: 1472 },
 ]
 
 interface GeneratedImage {
   url: string
   revised_prompt: string
   ratio: string
+  size: string
+  width?: number
+  height?: number
+  naturalWidth?: number
+  naturalHeight?: number
 }
 
 interface ImageGenerationItem {
   url?: string
   revised_prompt?: string
+  ratio?: string
+  size?: string
+  width?: number
+  height?: number
 }
 
 interface ImageGenerationResponse {
@@ -38,6 +47,9 @@ export default function ImagePage() {
   const [images, setImages] = useState<GeneratedImage[]>([])
   const [error, setError] = useState<string | null>(null)
 
+  const selectedRatio = ASPECT_RATIOS.find(r => r.value === ratio)!
+  const sizeStr = `${selectedRatio.w}x${selectedRatio.h}`
+
   const handleGenerate = async () => {
     if (!prompt.trim() || loading) return
     setLoading(true)
@@ -51,7 +63,11 @@ export default function ImagePage() {
           model: "dall-e-3",
           prompt: prompt.trim(),
           n,
+          size: sizeStr,
           ratio,
+          aspect_ratio: ratio,
+          width: selectedRatio.w,
+          height: selectedRatio.h,
           response_format: "url",
         }),
       })
@@ -69,7 +85,10 @@ export default function ImagePage() {
         .map(item => ({
           url: item.url,
           revised_prompt: item.revised_prompt || prompt,
-          ratio,
+          ratio: item.ratio || ratio,
+          size: item.size || sizeStr,
+          width: item.width,
+          height: item.height,
         }))
 
       if (newImages.length === 0) {
@@ -96,6 +115,27 @@ export default function ImagePage() {
     a.target = "_blank"
     a.rel = "noopener noreferrer"
     a.click()
+  }
+
+  const handleImageLoad = (url: string, image: HTMLImageElement) => {
+    setImages(prev => prev.map(item => (
+      item.url === url
+        ? { ...item, naturalWidth: image.naturalWidth, naturalHeight: image.naturalHeight }
+        : item
+    )))
+  }
+
+  const formatActualSize = (img: GeneratedImage) => {
+    if (!img.naturalWidth || !img.naturalHeight) return "实际尺寸检测中"
+    return `${img.naturalWidth}x${img.naturalHeight}`
+  }
+
+  const getRatioStatus = (img: GeneratedImage) => {
+    if (!img.naturalWidth || !img.naturalHeight || !img.width || !img.height) return null
+    const expected = img.width / img.height
+    const actual = img.naturalWidth / img.naturalHeight
+    const diff = Math.abs(expected - actual) / expected
+    return diff <= 0.03 ? "比例匹配" : `实际比例 ${(actual).toFixed(2)}，与请求 ${img.ratio} 不一致`
   }
 
   return (
@@ -166,6 +206,11 @@ export default function ImagePage() {
             </div>
           </div>
 
+          {/* 尺寸预览 */}
+          <div className="text-xs text-muted-foreground font-mono bg-muted/50 border rounded-md px-2 py-1">
+            {sizeStr}
+          </div>
+
           {/* 生成按钮 */}
           <Button
             onClick={handleGenerate}
@@ -221,6 +266,7 @@ export default function ImagePage() {
                     alt={img.revised_prompt}
                     className="w-full h-auto object-contain"
                     loading="lazy"
+                    onLoad={e => handleImageLoad(img.url, e.currentTarget)}
                     onError={e => {
                       const target = e.currentTarget
                       target.style.display = "none"
@@ -252,8 +298,15 @@ export default function ImagePage() {
                 <div className="p-3 space-y-1">
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <span className="bg-muted rounded px-1.5 py-0.5 font-mono">{img.ratio}</span>
+                    <span className="bg-muted rounded px-1.5 py-0.5 font-mono">请求 {img.size}</span>
+                    <span className="bg-muted rounded px-1.5 py-0.5 font-mono">实际 {formatActualSize(img)}</span>
                     <span className="truncate">{img.revised_prompt.slice(0, 80)}</span>
                   </div>
+                  {getRatioStatus(img) && (
+                    <div className={`text-xs ${getRatioStatus(img) === "比例匹配" ? "text-emerald-500" : "text-amber-500"}`}>
+                      {getRatioStatus(img)}
+                    </div>
+                  )}
                   <div className="text-xs text-muted-foreground font-mono truncate">{img.url}</div>
                 </div>
               </div>
