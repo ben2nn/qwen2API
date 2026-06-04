@@ -83,9 +83,15 @@ def load_api_keys() -> set:
     return set()
 
 def save_api_keys(keys: set):
-    API_KEYS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(API_KEYS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"keys": list(keys)}, f, indent=2)
+    try:
+        API_KEYS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(API_KEYS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"keys": list(keys)}, f, indent=2)
+        return True
+    except Exception as e:
+        import logging
+        logging.getLogger("config").error(f"保存 API keys 失败: {e}")
+        return False
 
 # 在内存中存储管理的 API Keys
 API_KEYS = load_api_keys()

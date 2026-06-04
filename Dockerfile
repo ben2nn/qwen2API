@@ -10,6 +10,10 @@ RUN npm run build
 
 # Stage 2: Runtime image.
 FROM python:3.12-slim-bookworm
+
+# 创建非 root 用户
+RUN groupadd -r appuser && useradd -r -g appuser -d /workspace -s /sbin/nologin appuser
+
 WORKDIR /workspace
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -65,7 +69,13 @@ COPY start.py ./
 RUN mkdir -p /workspace/data /workspace/logs /workspace/frontend
 COPY --from=frontend-builder /app/dist ./frontend/dist
 
+# 设置目录权限，确保非 root 用户可写
+RUN chown -R appuser:appuser /workspace
+
 EXPOSE 7860
+
+# 切换到非 root 用户运行
+USER appuser
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${PORT:-7860}/healthz" || exit 1

@@ -345,7 +345,12 @@ async def create_key():
 
     new_key = f"sk-{secrets.token_hex(24)}"
     API_KEYS.add(new_key)
-    save_api_keys(API_KEYS)
+
+    if not save_api_keys(API_KEYS):
+        # 保存失败，回滚内存更改
+        API_KEYS.discard(new_key)
+        return {"ok": False, "error": "生成失败，请检查权限"}
+
     return {"ok": True, "key": new_key}
 
 @router.delete("/keys/{key}", dependencies=[Depends(verify_admin)])
