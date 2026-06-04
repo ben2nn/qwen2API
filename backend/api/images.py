@@ -84,7 +84,8 @@ def _get_token(request: Request) -> str:
     return request.headers.get("x-api-key", "").strip()
 
 
-def _build_image_prompt(prompt: str, *, size: str, ratio: str) -> str:
+def _build_image_prompt_with_size(prompt: str, *, size: str, ratio: str) -> str:
+    """构建带尺寸/比例约束的图片生成 prompt（用于非匿名模式）"""
     return (
         "请调用图片生成能力直接生成图片，不要只输出文字描述。"
         "如果可以生成图片，请返回可访问的图片链接或包含图片链接的结果。\n"
@@ -93,6 +94,10 @@ def _build_image_prompt(prompt: str, *, size: str, ratio: str) -> str:
         f"用户需求：{prompt}"
     )
 
+
+def _build_image_prompt_plain(prompt: str) -> str:
+    """直接返回原始 prompt（用于匿名模式）"""
+    return prompt
 
 @router.post("/v1/images/generations")
 @router.post("/images/generations")
@@ -128,7 +133,11 @@ async def create_image(request: Request):
     acc = None
     chat_id = None
     try:
-        prompt_text = _build_image_prompt(prompt, size=size, ratio=ratio)
+        # 根据是否有可用账号决定 prompt 构建方式
+        # 无账号时会走匿名模式，匿名模式需要原始 prompt
+        has_accounts = len(client.account_pool.accounts) > 0
+        prompt_text = _build_image_prompt_with_size(prompt, size=size, ratio=ratio) if has_accounts else _build_image_prompt_plain(prompt)
+        log.debug(f"[T2I] prompt_text={prompt_text[:100]!r}, has_accounts={has_accounts}")
         event_payloads: list[str] = []
         async for item in client.chat_stream_events_with_retry(
             model,
