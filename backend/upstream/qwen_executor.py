@@ -6,7 +6,7 @@ import time
 from backend.core.config import settings
 from backend.core.request_logging import update_request_context
 from backend.services.auth_resolver import AuthResolver
-from backend.upstream.payload_builder import build_chat_payload
+from backend.upstream.payload_builder import build_chat_payload, IMAGE_CHAT_TYPES
 from backend.upstream.sse_consumer import parse_sse_chunk
 
 log = logging.getLogger("web2api.executor")
@@ -444,7 +444,9 @@ class QwenExecutor:
 
             # 检查是否是匿名模式
             if acc.token == "anonymous":
-                log.info(f"[上游] 使用匿名访客模式 模型={model} stream={stream}")
+                # 从 chat_type 推导 mode（mode 显式传入时优先使用）
+                effective_mode = mode or ("image" if chat_type in IMAGE_CHAT_TYPES else None)
+                log.info(f"[上游] 使用匿名访客模式 模型={model} stream={stream} mode={effective_mode} chat_type={chat_type}")
                 try:
                     # 提取第一个文件路径（匿名模式只支持单文件）
                     file_path = None
@@ -459,7 +461,7 @@ class QwenExecutor:
                     log.info(f"[上游] 匿名模式参数 file_path={file_path} image_options={image_options} stream={stream}")
 
                     anon_method = self._stream_via_anonymous if stream else self._chat_via_anonymous
-                    async for evt in anon_method(content, model, mode=mode, file_path=file_path, image_options=image_options):
+                    async for evt in anon_method(content, model, mode=effective_mode, file_path=file_path, image_options=image_options):
                         yield evt
                     return
                 except Exception as e:

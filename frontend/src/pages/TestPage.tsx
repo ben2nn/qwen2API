@@ -567,7 +567,28 @@ export default function TestPage() {
 
   const handleImageGenerate = async (prompt: string) => {
     if (!prompt && attachedImages.length === 0) return
+
+    // 先构建用户消息，立即显示在会话中
+    let userContent: MessageContent = `🎨 生成图片：${prompt || "根据参考图生成"}`
+    if (attachedImages.length > 0) {
+      const parts: ContentPart[] = []
+      if (prompt) {
+        parts.push({ type: "text", text: `🎨 生成图片：${prompt}` })
+      } else {
+        parts.push({ type: "text", text: "🎨 根据参考图生成" })
+      }
+      for (const img of attachedImages) {
+        const dataUri = img.base64 || await compressImage(img.file)
+        parts.push({ type: "image_url", image_url: { url: dataUri } })
+      }
+      userContent = parts
+    }
+
+    setMessages(prev => [...prev, { role: "user", content: userContent }])
+    setInput("")
+    setAttachedImages([])
     setLoading(true)
+
     try {
       const requestBody: Record<string, unknown> = {
         model: "dall-e-3",
@@ -595,6 +616,8 @@ export default function TestPage() {
       const data = (await res.json()) as ImageGenerationResponse
       if (!res.ok) {
         const detail = data?.detail || data?.error || `HTTP ${res.status}`
+        const errMsg = `❌ 生成失败: ${String(detail).slice(0, 80)}`
+        setMessages(prev => [...prev, { role: "assistant", content: errMsg, error: true }])
         toast.error(`生成失败: ${String(detail).slice(0, 80)}`)
         return
       }
@@ -604,35 +627,19 @@ export default function TestPage() {
         .filter((url): url is string => typeof url === "string" && url.length > 0)
 
       if (urls.length === 0) {
+        setMessages(prev => [...prev, { role: "assistant", content: "❌ 未返回图片，请重试", error: true }])
         toast.error("未返回图片，请重试")
         return
       }
 
-      let userContent: MessageContent = `🎨 生成图片：${prompt || "根据参考图生成"}`
-      if (attachedImages.length > 0) {
-        const parts: ContentPart[] = []
-        if (prompt) {
-          parts.push({ type: "text", text: `🎨 生成图片：${prompt}` })
-        } else {
-          parts.push({ type: "text", text: "🎨 根据参考图生成" })
-        }
-        for (const img of attachedImages) {
-          const dataUri = img.base64 || await compressImage(img.file)
-          parts.push({ type: "image_url", image_url: { url: dataUri } })
-        }
-        userContent = parts
-      }
-
       setMessages(prev => [
         ...prev,
-        { role: "user", content: userContent },
         { role: "assistant", content: urls.map(url => `![generated](${url})`).join("\n") },
       ])
-      setInput("")
-      setAttachedImages([])
       toast.success(`成功生成 ${urls.length} 张图片`)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "网络错误"
+      setMessages(prev => [...prev, { role: "assistant", content: `❌ 生成失败: ${msg}`, error: true }])
       toast.error(`生成失败: ${msg}`)
     } finally {
       setLoading(false)

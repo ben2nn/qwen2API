@@ -427,6 +427,28 @@ class QwenAnonymousClient:
         except Exception:
             pass
 
+    async def _take_screenshot(self, name: str) -> str | None:
+        """截取当前页面截图，返回文件路径。
+
+        Args:
+            name: 截图文件名前缀
+
+        Returns:
+            截图文件路径，失败返回 None
+        """
+        if not self._page:
+            return None
+        try:
+            ts = int(time.time() * 1000) % 100000
+            filename = f"screenshot_{name}_{ts}.png"
+            filepath = os.path.join(os.path.dirname(__file__), "..", "..", filename)
+            await self._page.screenshot(path=filepath, full_page=False)
+            log.info(f"[Anonymous] [Screenshot] {filepath}")
+            return filepath
+        except Exception as e:
+            log.warning(f"[Anonymous] [Screenshot] 截图失败: {e}")
+            return None
+
     # ── 登录弹窗处理 ──
 
     async def _dismiss_login_popup(self) -> bool:
@@ -1537,16 +1559,40 @@ class QwenAnonymousClient:
         log.info(f"[Anonymous] 开始流式等待 (超时: {timeout_sec}s, 模式: {mode})")
 
         # 等待 AI 开始响应
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
         current_url = self._page.url
         log.info(f"[Anonymous] 当前 URL: {current_url}")
 
-        # 如果跳转到着陆页，说明发送失败
-        is_landing = current_url.rstrip('/') in ('https://chat.qwen.ai', 'https://chat.qwen.ai/') or '/c/' not in current_url
+        # 检测是否真的回到了着陆页（发送失败）
+        # 访客模式下 URL 可能停留在 chat.qwen.ai/ 而不跳转到 /c/guest，
+        # 因此需要同时检查页面是否有 AI 响应迹象
+        is_landing = current_url.rstrip('/') in ('https://chat.qwen.ai', 'https://chat.qwen.ai/', 'https://chat.qwen.ai/c/guest')
         if is_landing:
-            log.warning(f"[Anonymous] page returned to landing after send: {current_url}; stop to avoid duplicate submit")
-            yield {"error": f"page returned to landing after send: {current_url}"}
-            return
+            # 检查页面是否有响应内容或生成中状态（说明发送成功，只是 URL 没变）
+            has_activity = await self._page.evaluate(r"""() => {
+                const stop = document.querySelector('button[aria-label="Stop"], button[aria-label="停止"]');
+                const loading = document.querySelector('[class*="loading"], [class*="generating"], [class*="spinner"]');
+                const response = document.querySelector('.response-message-content, .qwen-markdown-text');
+                const chatMessages = document.querySelectorAll('[class*="message-content"]');
+                return !!(stop || loading || response || chatMessages.length > 0);
+            }""")
+            if has_activity:
+                log.info(f"[Anonymous] URL 为着陆页但有响应活动，继续等待")
+            else:
+                # 再等一下，有些情况下响应启动较慢
+                await asyncio.sleep(2)
+                has_activity = await self._page.evaluate(r"""() => {
+                    const stop = document.querySelector('button[aria-label="Stop"], button[aria-label="停止"]');
+                    const loading = document.querySelector('[class*="loading"], [class*="generating"], [class*="spinner"]');
+                    const response = document.querySelector('.response-message-content, .qwen-markdown-text');
+                    return !!(stop || loading || response);
+                }""")
+                if not has_activity:
+                    log.warning(f"[Anonymous] page returned to landing after send: {current_url}; no activity detected")
+                    yield {"error": f"page returned to landing after send: {current_url}"}
+                    return
+                else:
+                    log.info(f"[Anonymous] 延迟检测到响应活动，继续等待")
 
         # ── 图片生成模式：轮询图片 URL ──
         if mode == "image":
@@ -1738,6 +1784,30 @@ class QwenAnonymousClient:
         stable_count = 0
         no_progress_count = 0
         log.info(f"[Anonymous] 开始等待回复 (超时: {timeout_sec}s, 模式: {mode})")
+
+        # 等待 AI 开始响应
+        await asyncio.sleep(2)
+        current_url = self._page.url
+        is_landing = current_url.rstrip('/') in ('https://chat.qwen.ai', 'https://chat.qwen.ai/', 'https://chat.qwen.ai/c/guest')
+        if is_landing:
+            has_activity = await self._page.evaluate(r"""() => {
+                const stop = document.querySelector('button[aria-label="Stop"], button[aria-label="停止"]');
+                const loading = document.querySelector('[class*="loading"], [class*="generating"], [class*="spinner"]');
+                const response = document.querySelector('.response-message-content, .qwen-markdown-text');
+                return !!(stop || loading || response);
+            }""")
+            if not has_activity:
+                await asyncio.sleep(2)
+                has_activity = await self._page.evaluate(r"""() => {
+                    const stop = document.querySelector('button[aria-label="Stop"], button[aria-label="停止"]');
+                    const loading = document.querySelector('[class*="loading"], [class*="generating"], [class*="spinner"]');
+                    const response = document.querySelector('.response-message-content, .qwen-markdown-text');
+                    return !!(stop || loading || response);
+                }""")
+            if not has_activity:
+                log.warning(f"[Anonymous] page returned to landing after send: {current_url}; no activity")
+                return None
+            log.info(f"[Anonymous] URL 为着陆页但有响应活动，继续等待")
 
         while time.time() - start < timeout_sec:
             await asyncio.sleep(3)
@@ -1960,6 +2030,10 @@ class QwenAnonymousClient:
         except Exception as e:
             log.error(f"[Anonymous] 等待回复异常: {e}")
             reply = None
+
+        # 截取结果页
+        # await self._take_screenshot("result")
+
         if reply:
             return AnonymousResponse(content=reply, success=True)
         else:
